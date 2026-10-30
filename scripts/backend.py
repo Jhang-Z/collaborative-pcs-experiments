@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 from replay import coordinator_graph, mpi_graph, read_mpi, replay
@@ -24,7 +25,7 @@ def selected_json(path, keys):
     return {key: value[key] for key in keys if key in value}
 
 
-def execute_job(root, run, job, runtime, resources, settings, timeout, set_phase):
+def execute_job(root, run, job, runtime, resources, settings, timeout, set_phase, command_wall_s=None):
     work = run / 'private' / job['label']
     work.mkdir(mode=0o700)
     kind, n, size = job['kind'], job['N'], job['size']
@@ -35,13 +36,19 @@ def execute_job(root, run, job, runtime, resources, settings, timeout, set_phase
     cpu = ['taskset', '-c', str(resources['compute_cpu'])]
     environment = dict(os.environ, **runtime.get('environment', {}))
     environment.update(OMP_NUM_THREADS='1', RAYON_NUM_THREADS='1')
+    if command_wall_s is None:
+        command_wall_s = {}
 
     def call(phase, command, check=True, env=None):
         set_phase(phase)
         path = work / (phase + '.log')
-        with path.open('x') as stream:
-            result = subprocess.run(list(map(str, command)), stdout=stream,
-                stderr=subprocess.STDOUT, env=env or environment, timeout=timeout)
+        start = time.monotonic()
+        try:
+            with path.open('x') as stream:
+                result = subprocess.run(list(map(str, command)), stdout=stream,
+                    stderr=subprocess.STDOUT, env=env or environment, timeout=timeout)
+        finally:
+            command_wall_s[phase] = time.monotonic() - start
         if check and result.returncode:
             raise CommandFailed(phase, result.returncode)
         return result.returncode, path.read_text(errors='replace')
@@ -200,7 +207,7 @@ def execute_job(root, run, job, runtime, resources, settings, timeout, set_phase
             settings['networks'][name]['rtt_ms']) for name in job['networks']}
     return dict(full_proof_verified=verified, proof_generation_completed=True,
         negative_control_passed=True if verified else None, local_compute_ns=local_compute_ns,
-        timing=times, auxiliary=auxiliary, dimensions=(
+        timing=times, auxiliary=auxiliary, command_wall_s=command_wall_s, dimensions=(
             dict(input_bits=1 << size, workers=n) if kind.endswith('pcs') else
             dict(instances=size, rounds=24, private_bits_per_instance=1600,
                  public_bits_per_instance=256, workers=n)))

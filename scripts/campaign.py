@@ -102,11 +102,12 @@ def case(root, run, label):
     observer = threading.Thread(target=observe, daemon=True)
     observer.start()
     result = dict(job, passed=False, formal_performance=plan['performance_sample'],
-                  origin_run=run.name, time_adjustments=False)
+                  origin_run=run.name, time_adjustments=False, command_wall_s={})
     start = time.monotonic()
     try:
         result.update(execute_job(root, run, job, runtime, cfg, plan['config'],
-                                 cfg['timeout_seconds'], lambda value: phase.__setitem__(0, value)))
+                                 cfg['timeout_seconds'], lambda value: phase.__setitem__(0, value),
+                                 result['command_wall_s']))
         result['passed'] = True
     except Exception as error:
         result['error'] = dict(type=type(error).__name__, phase=phase[0])
@@ -197,10 +198,12 @@ def export(run):
 
 def execute(root, run, selected, settings, args):
     from bootstrap import prepare
+    campaign_start = time.monotonic()
     (run / 'private').mkdir(mode=0o700)
     (run / 'public').mkdir()
     state = dict(complete=False, expected=len(selected), cases=[],
-                 performance_sample=not args.smoke, model='causal-fifo-tx-fair-rx-v1')
+                 performance_sample=not args.smoke, model='causal-fifo-tx-fair-rx-v1',
+                 started_at_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
     save(run / 'public/settings.json', settings)
     save(run / 'public/plan.json', json.loads((run / 'plan.json').read_text()))
     save(run / 'public/source-manifest.json', json.loads((root / 'SOURCE_MANIFEST.json').read_text()))
@@ -233,6 +236,7 @@ def execute(root, run, selected, settings, args):
                 mpi_library_sha256=runtime.get('mpi_library_sha256'),
                 source_manifest_sha256=hashlib.sha256((root / 'SOURCE_MANIFEST.json').read_bytes()).hexdigest()))
             prepare_inputs(root, run, selected)
+            state['setup_and_inputs_wall_s'] = time.monotonic() - campaign_start
             for job in selected:
                 state['running'] = job['label']; save(run / 'public/state.json', state)
                 cfg = discover(args.reserve_fraction, requested)
@@ -267,6 +271,8 @@ def execute(root, run, selected, settings, args):
             state['error'] = str(error)
             raise
         finally:
+            state['campaign_wall_s'] = time.monotonic() - campaign_start
+            state['finished_at_utc'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
             save(run / 'public/state.json', state)
             summarize(run, state)
             export(run)

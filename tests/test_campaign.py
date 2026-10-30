@@ -91,6 +91,34 @@ class ServiceAdmission(unittest.TestCase):
             campaign.admit_service(self.config())
 
 
+class FailedCommandTiming(unittest.TestCase):
+    def test_failed_case_keeps_elapsed_command_time_in_public_record(self):
+        from backend import CommandFailed
+        with tempfile.TemporaryDirectory() as folder:
+            run=Path(folder); (run/'private/case-resources').mkdir(parents=True)
+            (run/'public').mkdir()
+            job=dict(label='failed-proof',kind='ours-app',N=32,size=8)
+            campaign.save(run/'plan.json',dict(jobs=[job],performance_sample=False,config={}))
+            campaign.save(run/'private/runtime.json',{})
+            campaign.save(run/'private/case-resources/failed-proof.json',dict(
+                progress_cpus=[1],compute_cpu=0,memory_budget_bytes=100,timeout_seconds=1))
+            snap={'memory.max':100,'memory.peak':10,'memory.swap.max':0,'memory.swap.peak':0,
+                'memory.events':{'max':0,'oom':0,'oom_kill':0}}
+            def fail(*args):
+                args[-2]('prove'); args[-1]['prove']=.25
+                raise CommandFailed('prove',7)
+            with patch('campaign.admit_service',return_value={'cgroup_ancestors':[]}), \
+                 patch('campaign.os.sched_setaffinity',create=True), \
+                 patch('campaign.ancestors',return_value=[]), \
+                 patch('campaign.memory_snapshot',return_value=snap), \
+                 patch('backend.execute_job',side_effect=fail):
+                self.assertEqual(campaign.case(ROOT,run,'failed-proof'),1)
+            result=json.loads((run/'public/cases/failed-proof.json').read_text())
+            self.assertFalse(result['passed'])
+            self.assertEqual(result['command_wall_s'],{'prove':.25})
+            self.assertEqual(result['error']['returncode'],7)
+
+
 class PackagedContract(unittest.TestCase):
     def test_canonical_input_contract_loads_from_clean_repository(self):
         path = ROOT / 'experiments/benchmarks-2026-10-23/keccak-baselines-20261029/contract.py'
