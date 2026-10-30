@@ -1,0 +1,14 @@
+{
+  "binius64": {
+    "url": "https://github.com/binius-zk/binius64.git",
+    "commit": "4428e759dd27956bd5b9ae5025d67eb8ccc1accf",
+    "directory": "experiments/implementations/binius64",
+    "file_manifest": "third_party/binius64-files.json"
+  },
+  "pappas": {
+    "url": "https://github.com/ChristodoulosPappas/Code-Based-Scalable-coSNARKs.git",
+    "commit": "1c50a7410fa464ad325e0014d0d5fedd196d86c5",
+    "directory": ".deps/pappas",
+    "file_manifest": "third_party/pappas-files.json"
+  }
+}

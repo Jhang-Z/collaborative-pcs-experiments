@@ -1,0 +1,5 @@
+#include "pcs_proof.hpp"
+unsigned long int mul_counter=0;
+int tensor_row_size=0,cosumcheck_offset=0,sumcheck_offset=4,PC_offset=10,multree_offset=4;
+bool isLAN=false;
+int main(int argc,char**argv){MPI_Init(&argc,&argv);int rank;MPI_Comm_rank(MPI_COMM_WORLD,&rank);try{F::init();pa::require(argc>=3,"missing command");std::string command=argv[1];if(command=="prepare"){pa::require(argc==5,"prepare master statement output-directory");pa::Statement s(pa::read(argv[3]));pa::prepare(argv[2],s,argv[4]);printf("{\"input_mapping\":true,\"prepared\":true}\n");}else if(command=="prove"){pa::require(argc==4,"prove private-directory public-output-directory");pa::prove(argv[2],argv[3]);}else if(command=="verify"){pa::require(argc==3,"verify public-directory");pa::verify(argv[2]);}else if(command=="forge-terminal-test"){pa::require(argc==4,"forge-terminal-test public-directory row|column");pa::forge_terminal_test(argv[2],std::string(argv[3])=="column");}else throw std::runtime_error("unknown command");MPI_Finalize();return 0;}catch(const std::exception&e){fprintf(stderr,"PAPPAS_REJECT: %s\n",e.what());MPI_Abort(MPI_COMM_WORLD,2);return 2;}}

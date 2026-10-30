@@ -1,0 +1,16 @@
+{
+  "schema": "experiment-settings-v1",
+  "workers": [32, 64, 128, 256],
+  "parameters": {"gamma": 871, "tau": 4},
+  "repetitions": 1,
+  "networks": {
+    "LAN": {"bandwidth_gbps": 10, "rtt_ms": 2},
+    "WAN": {"bandwidth_gbps": 0.2, "rtt_ms": 50}
+  },
+  "groups": {
+    "1": {"task": "keccak-f1600-truncated256", "instances": [512, 1024], "networks": ["LAN"], "baselines": ["binius64-single-core"]},
+    "2": {"task": "pcs", "input_log_bits": [16, 18, 20, 22, 24], "networks": ["LAN", "WAN"], "baselines": ["pappas"]},
+    "3": {"task": "keccak-f1600-truncated256", "instances": [32, 64], "workers": [16, 32, 64, 128], "networks": ["LAN", "WAN"], "baselines": ["pappas"]},
+    "4": {"task": "keccak-f1600-truncated256", "instances": [512, 1024, 2048, 4096], "networks": ["LAN", "WAN"], "baselines": []}
+  }
+}

@@ -1,0 +1,62 @@
+pub mod application;
+// Existing algebra and verifier are compiled in place, without modifying their sources.
+#[path = "../../../implementations/protocol-core/src/algebra.rs"]
+pub mod algebra;
+#[path = "../../../implementations/protocol-core/src/code.rs"]
+pub mod code;
+pub mod coordinator;
+#[path = "../../../implementations/protocol-core/src/field.rs"]
+pub mod field;
+#[path = "../../../implementations/protocol-core/src/fs.rs"]
+pub mod fs;
+#[path = "../../../implementations/protocol-core/src/indexed.rs"]
+pub mod indexed;
+#[path = "../../../implementations/protocol-core/src/indexed_codec.rs"]
+pub mod indexed_codec;
+#[path = "../../../implementations/protocol-core/src/merkle.rs"]
+pub mod merkle;
+#[path = "../../../implementations/protocol-core/src/parallel.rs"]
+pub mod parallel;
+#[path = "../../../implementations/protocol-core/src/params.rs"]
+pub mod params;
+pub mod prepare;
+#[path = "../../../implementations/protocol-core/src/product_tree.rs"]
+pub mod product_tree;
+#[path = "../../../implementations/protocol-core/src/protocol.rs"]
+pub mod protocol;
+#[path = "../../../implementations/protocol-core/src/public_pcs.rs"]
+pub mod public_pcs;
+#[path = "../../../implementations/protocol-core/src/setup.rs"]
+pub mod setup;
+#[path = "../../../implementations/protocol-core/src/sha_circuit.rs"]
+pub mod sha_circuit;
+#[path = "../../../implementations/protocol-core/src/sha_spartan.rs"]
+pub mod sha_spartan;
+#[path = "../../../implementations/protocol-core/src/sha_structured.rs"]
+pub mod sha_structured;
+#[path = "../../../implementations/protocol-core/src/sha_zk.rs"]
+pub mod sha_zk;
+#[path = "../../../implementations/protocol-core/src/sharing.rs"]
+pub mod sharing;
+#[path = "../../../implementations/protocol-core/src/sparse_matrix.rs"]
+pub mod sparse_matrix;
+#[path = "../../../implementations/protocol-core/src/spartan.rs"]
+pub mod spartan;
+#[path = "../../../implementations/protocol-core/src/transport.rs"]
+pub mod transport;
+pub mod wire;
+pub mod worker;
+pub mod simulation;
+#[path = "../../../implementations/protocol-core/src/zk.rs"]
+pub mod zk;
+
+pub(crate) mod preprocessing;
+// Required by the existing protocol test module; production entry is unchanged.
+#[cfg(test)]
+#[path = "../../../implementations/protocol-core/src/pcs_codec.rs"]
+pub mod pcs_codec;
+
+#[path = "../../../implementations/protocol-core/src/keccak_circuit.rs"]
+pub mod keccak_circuit;
+#[path = "../../../implementations/protocol-core/src/keccak_structured.rs"]
+pub mod keccak_structured;

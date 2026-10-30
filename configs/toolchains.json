@@ -1,0 +1,62 @@
+{
+  "schema": "artifact-toolchains-v1",
+  "reuse_policy": "Reuse accepted host tools; fixed fallback versions are project-local and do not change global defaults.",
+  "python": {
+    "minimum": "3.10"
+  },
+  "rust": {
+    "version": "1.98.1",
+    "url": "https://static.rust-lang.org/dist/rust-1.98.1-x86_64-unknown-linux-gnu.tar.xz"
+  },
+  "compiler": {
+    "minimum_major": 9,
+    "parallel_majors": [
+      14,
+      13,
+      12,
+      11,
+      10,
+      9
+    ],
+    "install_major": 12
+  },
+  "cmake": {
+    "accepted_minimum": "3.10.0",
+    "accepted_maximum_exclusive": "4.0.0",
+    "isolated_version": "3.31.6",
+    "url": "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz",
+    "checksums_url": "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-SHA-256.txt"
+  },
+  "openmpi": {
+    "accepted_majors": [
+      4,
+      5
+    ],
+    "isolated_version": "4.1.6",
+    "url": "https://download.open-mpi.org/release/open-mpi/v4.1/openmpi-4.1.6.tar.gz",
+    "sha256": "44da277b8cdc234e71c62473305a09d63f4dcca292ca40335aab7c4bf0e6a566",
+    "checksum_source": "https://www.open-mpi.org/software/ompi/v4.1/"
+  },
+  "formal_source_hashes": {
+    "native-pcs": {
+      "src/main.cpp": "48777837fcf229898c27368b2318a5453942d215427ef5abe2e0487bd175e358",
+      "src/merkle_tree.cpp": "ff74bcf931f4550d3c32f6496e6556e1602371f6bc6ff52851794ed50e8b7158",
+      "src/pcs_adapter.hpp": "bfab0df6fe5be68f1dcdf85269dd9bfaa852dd140f72840e3fdba03b539e5715",
+      "src/pcs_proof.hpp": "388c28b5383872d3a5c8f2b1cce58482ca87c4dae4f155ffda0d1faefc50c1d0"
+    },
+    "native-keccak": {
+      "src/main.cpp": "7c46a0f34a221769303de171b96b5eb10477f89fdbe970cbb98d68300bfe1907",
+      "src/merkle_tree.cpp": "ff74bcf931f4550d3c32f6496e6556e1602371f6bc6ff52851794ed50e8b7158",
+      "src/MPI_utils.cpp": "1aea5d06c442dc706c7581155f8eb6ceaa0c71b89fa456e3720b9373d5e2799b",
+      "src/utils.cpp": "fb39e6f67efef3032c62557c039d0cf201e6553dca83bfe0d3789d7ab12ccc93",
+      "src/Distributed_Sumcheck.cpp": "1b58657eac5c2f06a886b467813d79c1e4c1823ce64d1604d26c1a16fa3da003",
+      "src/coPIOP.cpp": "9be5fe99656e15ae613814c0470fc47e9ea990774df0b00aca78edcfe0270c20",
+      "src/stream_prepare.cpp": "832f3f47755617e39088a03400ee89902f36b68db8e74dda2afaaf90942c2ed9",
+      "src/stream_prepare.hpp": "868ce0575b279131e9570de6f66c911b0eeda3307c2f839168604c4d37f78519",
+      "src/stream_shares.hpp": "d331e94e1bec34d48b2a5075461406812a37e6c83bd3d0037aaa8403b22d3390",
+      "src/keccak_input.cpp": "4e2197fd3989c2745cfc6cbb14c120a37acfd1b3639fce8e4e0db2d25b4fb418",
+      "src/keccak_input.h": "ecb8a87cdcb5db3d140af7c03dc5faf0593993c094e0437bc6c49edb614d2b69",
+      "src/parameters.hpp": "e924b9d68e99f0586b0c4fc480d29744e3c28b7f791144fcc85c3603d6e16f3f"
+    }
+  }
+}

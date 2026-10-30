@@ -1,0 +1,10 @@
+build/
+.deps/
+.toolchains/
+.venv/
+runs/
+exports/
+__pycache__/
+*.pyc
+.DS_Store
+experiments/implementations/binius64/

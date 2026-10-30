@@ -1,0 +1,18 @@
+[package]
+name = "ours-pcs"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0.98"
+b2proto = { path = "../../implementations/protocol-core" }
+binius-hash = { path = "../../implementations/binius64/crates/hash" }
+clap = { version = "4.5", features = ["derive"] }
+serde_json = "1.0.140"
+sha2 = "0.11.0"
+
+[profile.release]
+lto = "thin"
+debug = true

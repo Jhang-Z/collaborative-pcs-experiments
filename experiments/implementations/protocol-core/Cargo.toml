@@ -1,0 +1,30 @@
+[package]
+name = "b2proto"
+version = "0.1.0"
+edition = "2024"
+description = "Prototype of the collaborative opening protocol (distributed Ring Switching over a shared binary tensor code), built on Binius64."
+
+# Binius64 is expected as a sibling checkout: ../binius64 (commit 4428e759).
+[features]
+parallel = ["dep:rayon"]
+
+[dependencies]
+rayon = { version = "1.10", optional = true }
+binius-field = { path = "../binius64/crates/field" }
+binius-math = { path = "../binius64/crates/math" }
+binius-compute = { path = "../binius64/crates/compute" }
+binius-hash = { path = "../binius64/crates/hash" }
+binius-hash-prover = { path = "../binius64/crates/hash-prover" }
+binius-iop = { path = "../binius64/crates/iop" }
+binius-iop-prover = { path = "../binius64/crates/iop-prover" }
+binius-prover = { path = "../binius64/crates/prover" }
+binius-transcript = { path = "../binius64/crates/transcript" }
+binius-verifier = { path = "../binius64/crates/verifier" }
+digest = "0.11"
+bytemuck = "1.18"
+rand = { version = "0.10.1", default-features = false, features = ["std", "std_rng"] }
+sha2 = "0.11"
+
+[profile.release]
+lto = "thin"
+debug = true

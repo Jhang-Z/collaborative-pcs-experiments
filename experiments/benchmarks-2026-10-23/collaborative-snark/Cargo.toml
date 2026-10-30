@@ -1,0 +1,36 @@
+[package]
+name = "ours-fullnet"
+version = "0.1.0"
+edition = "2024"
+description = "Persistent per-party process adapter for the indexed collaborative SHA-256 protocol."
+
+# Uses the project-pinned Binius64 checkout (commit 4428e759).
+[workspace]
+
+[features]
+parallel = []
+
+[dependencies]
+rayon = "1.10"
+binius-field = { path = "../../implementations/binius64/crates/field" }
+binius-math = { path = "../../implementations/binius64/crates/math" }
+binius-compute = { path = "../../implementations/binius64/crates/compute" }
+binius-hash = { path = "../../implementations/binius64/crates/hash" }
+binius-hash-prover = { path = "../../implementations/binius64/crates/hash-prover" }
+binius-iop = { path = "../../implementations/binius64/crates/iop" }
+binius-iop-prover = { path = "../../implementations/binius64/crates/iop-prover" }
+binius-prover = { path = "../../implementations/binius64/crates/prover" }
+binius-transcript = { path = "../../implementations/binius64/crates/transcript" }
+binius-verifier = { path = "../../implementations/binius64/crates/verifier" }
+digest = "0.11"
+bytemuck = "1.18"
+rand = { version = "0.10.1", default-features = false, features = ["std", "std_rng"] }
+sha2 = "0.11"
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+debug = true

@@ -1,0 +1,45 @@
+name: Linux cold-build smoke (groups 1 and 4)
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      ARTIFACT_RUN_DIR: ${{ runner.temp }}/collab-pcs-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Unit tests and packaged-source verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          python3 -m unittest discover -s tests -v
+          python3 scripts/verify_source.py
+
+      - name: Cold-build and run groups 1 and 4 smoke through root systemd
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --non-interactive ./reproduce.sh --groups 1 4 --smoke --output "$ARTIFACT_RUN_DIR"
+          test -f "$ARTIFACT_RUN_DIR/results-public.tar.gz"
+
+      - name: Upload only the public results bundle
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ env.ARTIFACT_RUN_DIR }}/results-public.tar.gz
+          archive: false
+          if-no-files-found: ignore
+          retention-days: 14
