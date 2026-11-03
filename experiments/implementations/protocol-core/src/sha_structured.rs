@@ -37,7 +37,7 @@ fn validate_parameters(n: usize, groups: usize, gamma: usize, tau: usize) -> Res
         return Err("unsupported structured SHA party/group count".into());
     }
     let batch = groups * (n / 4); // bounded above by 8192 by the preceding check
-    let formal = gamma == 871 && tau == 4 && (8..=256).contains(&batch);
+    let formal = matches!(gamma,520|871) && tau == 4 && (8..=256).contains(&batch);
     let development = n == 8 && groups == 1 && gamma == 16 && tau == 3;
     if !formal && !development {
         return Err("unsupported structured SHA parameters: use the formal configuration or N8/B2/gamma16/tau3 development configuration".into());

@@ -12,6 +12,15 @@ def jobs(settings, groups=None, instances=None):
         sizes = config.get('instances', config.get('input_log_bits'))
         if instances is not None and 'instances' in config:
             sizes = [size for size in sizes if size in instances]
+        if config['task'] == 'xor-and-random50':
+            for size in sizes:
+                for kind in ['ours-general', 'native-general', 'binius-general']:
+                    for n in ([1] if kind == 'binius-general' else workers):
+                        for repetition in range(1, settings['repetitions'] + 1):
+                            label = f'{kind}-{size}-N{n}-r{repetition}'
+                            result[label] = dict(label=label, kind=kind, N=n, size=size,
+                                repetition=repetition, groups=[group], networks=config['networks'])
+            continue
         kinds = ['ours-pcs' if group == '2' else 'ours-app']
         kinds += [('native-pcs' if group == '2' else 'native-keccak')
                   for baseline in config['baselines'] if baseline == 'pappas']

@@ -3,8 +3,9 @@
 //! per element of L, and fixed-width bit strings for query indices.
 
 use binius_hash::{HashSuite,Blake3HashSuite};
-use digest::Digest;
-type PrefixDigest = <Blake3HashSuite as HashSuite>::LeafHash;
+#[path = "fs_prefix.rs"]
+mod prefix_cache;
+use prefix_cache::{PrefixCache,Snapshot};
 use std::{rc::Rc,cell::RefCell};
 
 use crate::{
@@ -17,12 +18,13 @@ pub struct Transcript<'a, H: HashSuite> {
 	chain: Rc<RefCell<Vec<u8>>>,
 	round: u64,
  global: Option<Rc<RefCell<Vec<u8>>>>,
+ prefix_cache:PrefixCache,
 }
 
 impl<'a, H: HashSuite> Transcript<'a, H> {
 	/// Starts the chain from the instance x = (pp, r, s_x), given as bytes.
 	pub fn new(hasher: &'a Hasher<H>, instance: &[u8]) -> Self {
-		Self { hasher, chain: Rc::new(RefCell::new(instance.to_vec())), round: 0, global: None }
+		Self { hasher, chain: Rc::new(RefCell::new(instance.to_vec())), round: 0, global: None, prefix_cache:PrefixCache::default() }
 	}
 
 	/// Digest of every absorbed message, for binding a following protocol.
@@ -35,14 +37,14 @@ impl<'a, H: HashSuite> Transcript<'a, H> {
 
 	/// Absorbs round i's oracle root and message and returns its challenge stream.
 	pub fn round(&mut self, root: &Hash, msg: &[u8]) -> Challenges<'a, H> {
+		crate::execution_trace::record_challenge();
 		self.round += 1;
   if let Some(shared)=&self.global {
    let mut p=shared.borrow_mut();
    p.extend_from_slice(&self.round.to_le_bytes());p.extend_from_slice(root);
    p.extend_from_slice(&(msg.len() as u64).to_le_bytes());p.extend_from_slice(msg);
-   let payload=p.clone();drop(p);
-   let cached=prefix_hash(&payload);
-   let mut c=Challenges {hasher:self.hasher,standalone:None,counter:1,buf:[0;32],used:0,bitbuf:0,nbits:0,global:Some((shared.clone(),payload,cached))};
+   let cached=self.prefix_cache.snapshot(&p);drop(p);
+   let mut c=Challenges {hasher:self.hasher,standalone:None,counter:1,buf:[0;32],used:0,bitbuf:0,nbits:0,global:Some((shared.clone(),cached))};
    c.buf=c.block(0);
    #[cfg(test)] {c.buf=testing::override_block(msg,c.buf);}
    c.record(&c.buf);return c;
@@ -72,17 +74,17 @@ pub struct Challenges<'a, H: HashSuite> {
 	used: usize,
 	bitbuf: u128,
 	nbits: u32,
- global: Option<(Rc<RefCell<Vec<u8>>>,Vec<u8>,PrefixDigest)>,
+ global: Option<(Rc<RefCell<Vec<u8>>>,Snapshot)>,
 }
 
 impl<H: HashSuite> Challenges<'_, H> {
 	fn block(&self, c: u64) -> Hash {
-		if let Some((_,_,prefix))=&self.global {let mut h=prefix.clone();Digest::update(&mut h,8u64.to_le_bytes());Digest::update(&mut h,c.to_le_bytes());return h.finalize().as_slice().try_into().expect("32-byte digest");}
+		if let Some((_,prefix))=&self.global {return prefix.block(c);}
   let (_,round,prior,root,msg)=self.standalone.as_ref().expect("standalone challenge");
   self.hasher.hash(&[b"b2pcs-FS-v4",crate::params::LAYOUT_ID,&round.to_le_bytes(),prior,root,msg,&c.to_le_bytes()])
 	}
 
-	fn record(&self,b:&Hash) {crate::transport::broadcast(b);if let Some((s,_,_))=&self.global {s.borrow_mut().extend_from_slice(b);}if let Some((s,_,_,_,_))=&self.standalone {s.borrow_mut().extend_from_slice(b);}}
+	fn record(&self,b:&Hash) {crate::transport::broadcast(b);if let Some((s,_))=&self.global {s.borrow_mut().extend_from_slice(b);}if let Some((s,_,_,_,_))=&self.standalone {s.borrow_mut().extend_from_slice(b);}}
  fn next_bytes(&mut self, out: &mut [u8]) {
 		for b in out {
 			if self.used == 32 {
@@ -144,17 +146,27 @@ mod literal_tests {
  use super::*;use binius_hash::Blake3HashSuite;
  #[test]fn global_blocks_match_literal_full_prefix_hash(){
   let h=Hasher::<Blake3HashSuite>::default();let mut t=Transcript::new_global(&h,b"literal");t.absorb(b"large message",&vec![17;100_000]);
-  let mut c=t.round(&[3;32],b"stage");let p=c.global.as_ref().unwrap().1.clone();
+  let mut c=t.round(&[3;32],b"stage");let p={let v=t.global.as_ref().unwrap().borrow();v[..v.len()-32].to_vec()};
   for ctr in 0u64..4 {let expected=h.hash(&[b"v04-FS-block",&p,&ctr.to_le_bytes()]);let got=c.field();assert_eq!(bytemuck::cast::<L,[u8;32]>(got),expected);}
  }
 }
 
-// Exact prefix of Hasher::hash([domain, full_public_prefix, counter]); cloning the BLAKE3 context
-// changes no hash input bytes and avoids hashing multi-megabyte G openings per block.
-fn prefix_hash(payload:&[u8])->PrefixDigest {
- let mut h=PrefixDigest::new();let tag=b"v04-FS-block";
- Digest::update(&mut h,(tag.len() as u64).to_le_bytes());Digest::update(&mut h,tag);
- Digest::update(&mut h,(payload.len() as u64).to_le_bytes());Digest::update(&mut h,payload);h
+#[cfg(test)]
+thread_local! {static PREFIX_HASHED_BYTES: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};}
+
+#[cfg(test)]
+mod prefix_cache_regression {
+ use super::*;
+ #[test]
+ fn global_prefix_hashing_does_not_rescan_history() {
+  PREFIX_HASHED_BYTES.with(|n|n.set(0));
+  let h=Hasher::<Blake3HashSuite>::default();
+  let mut t=Transcript::new_global(&h,b"cache regression");
+  let initial=vec![17u8;1<<20];t.absorb(b"large message",&initial);
+  for i in 0..16 {t.round(&[i;32],b"small append").field();}
+  let hashed=PREFIX_HASHED_BYTES.with(|n|n.get());
+  assert!(hashed<2*initial.len(),"rehashed {hashed} bytes for a 1 MiB append-only prefix");
+ }
 }
 
 // Force the first raw RO block at an identified message, including verifier replays.

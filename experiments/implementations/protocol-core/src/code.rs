@@ -23,6 +23,12 @@ use crate::field::{B, Field, L, mul_b};
 
 type Dc = GaoMateerPreExpanded<B>;
 
+std::thread_local! {static SEQUENTIAL_ENCODING:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
+pub struct SequentialEncoding(bool);
+/// Keep a logical party's NTT work on its measured thread. The codeword is unchanged.
+pub fn sequential_encoding()->SequentialEncoding {SequentialEncoding(SEQUENTIAL_ENCODING.with(|v|v.replace(true)))}
+impl Drop for SequentialEncoding {fn drop(&mut self){SEQUENTIAL_ENCODING.with(|v|v.set(self.0));}}
+
 fn as_b(v: &[L]) -> &[B] {
 	bytemuck::cast_slice(v)
 }
@@ -60,6 +66,15 @@ fn rs_encode<N: AdditiveNTT<Field = B> + Sync>(ntt: &N, msg: &[L], log_inv_rate:
 	let lg = log2_exact(msg.len());
 	let code = ReedSolomonCode::<B>::new(lg, log_inv_rate);
 	let input = split_coords(msg);
+
+    if SEQUENTIAL_ENCODING.with(std::cell::Cell::get) {
+        let bits=lg+1;
+        let coefficients:Vec<B>=(0..input.len()).map(|i|input[reverse_bits(i,bits as u32)]).collect();
+        let mut out=Vec::with_capacity(input.len()<<log_inv_rate);
+        for _ in 0..1<<log_inv_rate {out.extend_from_slice(&coefficients);}
+        ntt.forward_transform(FieldSliceMut::from_slice(bits+log_inv_rate,&mut out),log_inv_rate,1);
+        return into_l(out);
+    }
 	let out = code.encode_batch(ntt, FieldSlice::from_slice(lg + 1, &input), 1, &GlobalAllocator);
 	into_l(out.as_ref().to_vec())
 }
@@ -176,6 +191,28 @@ impl ColCode {
 		let msg: Vec<B> = (0..2 * kp).map(|i| chunk[reverse_bits(i, bits)]).collect();
 		join_coords(&msg)
 	}
+
+	/// Extend B-valued coset-0 values to the unchanged party nodes, without
+	/// computing a second, identically zero extension-field coordinate.
+	pub(crate) fn share_base_values(&self, values: &[B], out: &mut [B]) {
+		let kp = self.kp();
+		assert_eq!(values.len(), kp);
+		assert_eq!(out.len(), 2 * kp);
+		let log_total = self.log_kp + 2;
+		let mut buf = vec![B::ZERO; 1 << log_total];
+		buf[..kp].copy_from_slice(values);
+		self.ntt()
+			.inverse_transform(FieldSliceMut::from_slice(log_total, &mut buf), 2, 0);
+		// The inverse leaves bit-reversed coefficients. Repeating them is exactly
+		// encode_batch's zero-padding step, without reversing twice or reallocating.
+		let (coeffs, remaining) = buf.split_at_mut(kp);
+		for coset in remaining.chunks_exact_mut(kp) {
+			coset.copy_from_slice(coeffs);
+		}
+		self.ntt()
+			.forward_transform(FieldSliceMut::from_slice(log_total, &mut buf), 2, 0);
+		out.copy_from_slice(&buf[kp..3 * kp]);
+	}
 }
 
 #[cfg(test)]
@@ -245,6 +282,38 @@ mod tests {
 			assert_eq!(back, coeffs, "coset {c}");
 		}
 	}
+
+	#[test]
+	fn fast_bit_sharing_base_transform_matches_extension_code() {
+		let mut rng = StdRng::seed_from_u64(20261031);
+		for log_kp in 2..=7 {
+			let col = ColCode::new(log_kp);
+			for _ in 0..4 {
+				let values: Vec<B> = (0..col.kp()).map(|_| B::random(&mut rng)).collect();
+				let lifted: Vec<L> = values.iter().copied().map(crate::field::from_b).collect();
+				let expected = col.evaluate(&col.interpolate(&lifted, 0));
+				let mut actual = vec![B::ZERO; 2 * col.kp()];
+				col.share_base_values(&values, &mut actual);
+				for (i, value) in actual.into_iter().enumerate() {
+					assert_eq!(crate::field::from_b(value), expected[col.kp() + i]);
+				}
+			}
+		}
+	}
 }
 
 
+    #[test]
+    fn measured_thread_encoding_is_byte_identical() {
+        for log in [4,6,11] {
+            let c=RowCode::new(log,2);
+            let values:Vec<L>=(0..1<<log).map(|j|crate::field::from_words([17*j as u128+3,29*j as u128+7])).collect();
+            let expected=c.encode(&values);
+            let _single=sequential_encoding();assert_eq!(c.encode(&values),expected);
+        }
+        for log in [2,4,6] {
+            let c=ColCode::new(log);let values:Vec<L>=(0..1<<log).map(|j|crate::field::from_words([19*j as u128+5,31*j as u128+11])).collect();
+            let expected=c.evaluate(&values);
+            let _single=sequential_encoding();assert_eq!(c.evaluate(&values),expected);
+        }
+    }

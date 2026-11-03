@@ -176,6 +176,15 @@ impl Ctx {
 	/// Shares (B-valued) of k bits packed over the slots, random tail in B.
 	pub fn share_bits(&self, bits: impl Fn(usize) -> bool, rng: &mut impl Rng, out: &mut [B]) {
 		let tail: Vec<B> = (self.k..self.kp).map(|_| B::random(&mut *rng)).collect();
+		if self.n >= 64 {
+			let mut values = vec![B::ZERO; self.kp];
+			for y in 0..self.k {
+				values[y] = if bits(y) { B::ONE } else { B::ZERO };
+			}
+			values[self.k..].copy_from_slice(&tail);
+			self.sharing.col.share_base_values(&values, out);
+			return;
+		}
 		for (i, o) in out.iter_mut().enumerate() {
 			let row = &self.share_mat[i];
 			let mut s = B::ZERO;
@@ -200,6 +209,13 @@ impl Ctx {
 	pub fn open_packed(&self, shares: &[L]) -> Vec<L> {
 		(0..self.k).map(|y| (0..self.kp).map(|i| self.lag_packed[i][y] * shares[i]).sum()).collect()
 	}
+
+    /// The same first-k' reconstruction, using the public subspace NTT.
+    pub fn open_packed_fft(&self,shares:&[L])->Vec<L> {
+        assert_eq!(shares.len(),self.n);
+        let coefficients=self.sharing.col.interpolate(&shares[..self.kp],1);
+        self.sharing.col.evaluate(&coefficients)[..self.k].to_vec()
+    }
 
 	/// Ordinary Shamir shares of v at η_0, degree t'.
 	pub fn share_sss(&self, v: L, rng: &mut impl Rng) -> Vec<L> {
@@ -582,6 +598,31 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn fast_bit_sharing_matches_dense_shares_and_rng_state() {
+		for n in [8, 16, 32, 64, 128, 256] {
+			let ctx = Ctx::new(n);
+			for seed in 0..8 {
+				let bits: Vec<bool> = (0..ctx.k).map(|y| match seed {
+					0 => false,
+					1 => true,
+					_ => (y * 13 + seed * 7) % 11 < 5,
+				}).collect();
+				let mut old_rng = StdRng::seed_from_u64(seed as u64);
+				let mut new_rng = StdRng::seed_from_u64(seed as u64);
+				let tail: Vec<B> = (ctx.k..ctx.kp).map(|_| B::random(&mut old_rng)).collect();
+				let expected: Vec<B> = ctx.share_mat.iter().map(|row| {
+					let secret: B = (0..ctx.k).filter(|&y| bits[y]).map(|y| row[y]).sum();
+					secret + tail.iter().enumerate().map(|(y, &v)| row[ctx.k + y] * v).sum::<B>()
+				}).collect();
+				let mut actual = vec![B::ZERO; n];
+				ctx.share_bits(|y| bits[y], &mut new_rng, &mut actual);
+				assert_eq!(actual, expected, "N={n}, seed={seed}");
+				assert_eq!(new_rng.random::<u64>(), old_rng.random::<u64>(), "RNG N={n}");
+			}
+		}
+	}
+
+	#[test]
 	fn lagrange_over_all_nodes_matches_sharing() {
 		let mut rng = StdRng::seed_from_u64(40);
 		let ctx = Ctx::new(16);
@@ -678,3 +719,14 @@ mod tests {
 	}
 
 }
+    #[test]
+    fn fft_packed_decode_equals_cached_dense_map() {
+        let mut rng=StdRng::seed_from_u64(20261102);
+        for n in [8,16,32,64,128,256] {
+            let ctx=Ctx::new(n);
+            for _ in 0..3 {
+                let input:Vec<L>=(0..n).map(|_|L::random(&mut rng)).collect();
+                assert_eq!(ctx.open_packed(&input),ctx.open_packed_fft(&input),"N={n}");
+            }
+        }
+    }

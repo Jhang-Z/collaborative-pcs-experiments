@@ -5,7 +5,15 @@ use binius_field::arithmetic_traits::InvertOrZero;
 const ZERO:[u8;32]=[0;32];
 fn bytes(v:&[L])->&[u8]{bytemuck::cast_slice(v)}
 pub fn point(mut i:usize)->L{let(mut x,mut p)=(L::ZERO,L::ONE);while i>0{if i&1==1{x+=p;}p*=from_b(omega());i>>=1;}x}
-pub fn interpolate(v:&[L],x:L)->L{let pts:Vec<_>=(0..v.len()).map(point).collect();let mut out=L::ZERO;for i in 0..v.len(){let(mut a,mut b)=(L::ONE,L::ONE);for j in 0..v.len(){if i!=j{a*=x+pts[j];b*=pts[i]+pts[j];}}out+=v[i]*a*b.invert_or_zero();}out}
+fn interpolation_basis(n:usize)->Vec<(L,L)> {
+ let points:Vec<_>=(0..n).map(point).collect();
+ (0..n).map(|i|{let denominator=(0..n).filter(|&j|j!=i).map(|j|points[i]+points[j]).product::<L>();(points[i],denominator.invert_or_zero())}).collect()
+}
+pub fn interpolate(v:&[L],x:L)->L {
+ static BASIS:std::sync::OnceLock<Vec<Vec<(L,L)>>>=std::sync::OnceLock::new();
+ let temporary;let basis=if v.len()<=6 {&BASIS.get_or_init(||(0..=6).map(interpolation_basis).collect())[v.len()]}else{temporary=interpolation_basis(v.len());&temporary};
+ v.iter().enumerate().map(|(i,&v)|v*basis[i].1*basis.iter().enumerate().filter(|&(j,_)|j!=i).map(|(_,p)|x+p.0).product::<L>()).sum()
+}
 /// Degree <= factors.len(). The optional transport delivers every worker's contribution.
 pub fn round(f:&[Vec<L>])->Vec<L>{
  let n=crate::transport::party_count();let half=f[0].len()/2;let deg=f.len();

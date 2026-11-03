@@ -4,7 +4,9 @@
 
 This repository packages the active collaborative PCS/PIOP implementations, the native Binius64 adapter, the Pappas PCS/Keccak adapters, independent statement checks, and the common timing replay. It does not contain original private inputs, proof files, old experiment logs or the parent project's Git history. Running it generates a new run, not a copy of the original measurements.
 
-The scientific defaults are in `configs/experiments.json`. Build/setup and optional memory/watchdog overrides are operational settings and are recorded separately. Neither resource discovery nor dependency installation changes N, task size, gamma, tau or network parameters. A failed configuration stops the run; success requires both its validation checks and resource admission.
+The scientific defaults are in `configs/experiments.json`. Build/setup and optional memory/watchdog overrides are operational settings and are recorded separately. Neither resource discovery nor dependency installation changes N, task size, gamma, tau or network parameters. A failed legacy configuration stops the run. The random50 entry retains failures and attempts all selected configurations, then exits nonzero if any failed. Success requires both validation checks and resource admission.
+
+The current general circuit path, parameter selection, same-input contract and v2 actor replay are specified in [RANDOM50.md](RANDOM50.md). The legacy application timing/preparation descriptions below refer to the historical PCS/Keccak entries. Updating sources does not relabel old measurements as new validation.
 
 ## Offline preparation and memory
 

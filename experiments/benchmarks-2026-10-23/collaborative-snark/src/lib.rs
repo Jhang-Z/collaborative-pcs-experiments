@@ -1,4 +1,6 @@
 pub mod application;
+pub mod general;
+pub mod benchmark;
 // Existing algebra and verifier are compiled in place, without modifying their sources.
 #[path = "../../../implementations/protocol-core/src/algebra.rs"]
 pub mod algebra;
@@ -7,6 +9,8 @@ pub mod code;
 pub mod coordinator;
 #[path = "../../../implementations/protocol-core/src/field.rs"]
 pub mod field;
+#[path = "../../../implementations/protocol-core/src/execution_trace.rs"]
+pub mod execution_trace;
 #[path = "../../../implementations/protocol-core/src/fs.rs"]
 pub mod fs;
 #[path = "../../../implementations/protocol-core/src/indexed.rs"]
@@ -60,3 +64,6 @@ pub mod pcs_codec;
 pub mod keccak_circuit;
 #[path = "../../../implementations/protocol-core/src/keccak_structured.rs"]
 pub mod keccak_structured;
+
+#[path = "../../../implementations/protocol-core/src/compact_sparse_matrix.rs"]
+pub mod compact_sparse_matrix;

@@ -21,6 +21,27 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
+mod benchmark_handoff_tests {
+    use super::*;
+    use rand::{SeedableRng,rngs::StdRng};
+    #[test]
+    fn moving_prepared_state_keeps_private_vector_allocations() {
+        let cfg=crate::sha_zk::Config::synthetic(8,2,16,3,64);
+        let mut shares=crate::benchmark::states(&cfg,&mut StdRng::seed_from_u64(20261031));
+        let id=shares.len()-1; let sh=shares.pop().unwrap();
+        let z=sh.piop.z.as_ptr();
+        let rows=sh.piop.rows.each_ref().map(|v|v.as_ptr());
+        let main=sh.main.as_ptr(); let g=sh.g.as_ptr();
+        let public=Arc::new(PublicPreprocessing::new(cfg,vec![[0;32];4]));
+        let worker=Worker::with_shares(id,sh,public).unwrap();
+        assert_eq!(worker.sh.piop.z.as_ptr(),z);
+        assert_eq!(worker.sh.piop.rows.each_ref().map(|v|v.as_ptr()),rows);
+        assert_eq!(worker.pcs[0].row.as_ptr(),main);
+        assert_eq!(worker.pcs[1].row.as_ptr(),g);
+    }
+}
+
 pub(crate) struct Worker {
     id: usize,
     cfg: Arc<PublicPreprocessing>,
@@ -60,7 +81,11 @@ impl Worker {
     }
     pub(crate) fn with_preprocessing(id:usize,out:&Path,cfg:Arc<PublicPreprocessing>)->Result<Self> {
         ensure!(id<cfg.ctx.n,"party id");
-        let mut sh=Shares::read(&out.join(format!("party-{id}.private")),&cfg)?;
+        let sh=Shares::read(&out.join(format!("party-{id}.private")),&cfg)?;
+        Self::with_shares(id,sh,cfg)
+    }
+    pub(crate) fn with_shares(id:usize,mut sh:Shares,cfg:Arc<PublicPreprocessing>)->Result<Self> {
+        ensure!(id<cfg.ctx.n,"party id");
         let mut p = Party::new(id, cfg.pcs.params.n(), 0);
         p.row = std::mem::take(&mut sh.main);
         p.rng = prepare::entropy()?;
@@ -525,20 +550,26 @@ pub fn run_stdio(id: usize, out: &Path) -> Result<()> {
     let prep=Instant::now();
     let shape=Shape::read(out)?;
     let worker=Worker::new(shape,id,out)?;
-    stdio_loop(worker,prep)
+    stdio_loop(worker,prep,false)
 }
 /// Fork starts from public-only state; private shares/salts are loaded here,
 /// independently in this worker. No party share is allocated in the parent.
 pub(crate) fn run_stdio_with_public(id:usize,out:&Path,public:Arc<PublicPreprocessing>)->Result<()> {
     let prep=Instant::now();let worker=Worker::with_preprocessing(id,out,public)?;
-    stdio_loop(worker,prep)
+    stdio_loop(worker,prep,false)
 }
-fn stdio_loop(mut worker:Worker,prep:Instant)->Result<()> {
+pub(crate) fn run_stdio_benchmark_with_public(id:usize,public:Arc<PublicPreprocessing>)->Result<()> {
+    let prep=Instant::now();
+    let sh=crate::benchmark::state(&public.cfg,&mut prepare::entropy()?);
+    let worker=Worker::with_shares(id,sh,public)?;
+    stdio_loop(worker,prep,true)
+}
+fn stdio_loop(mut worker:Worker,prep:Instant,synthetic:bool)->Result<()> {
     use std::io::Write;
     let id=worker.id;
     let ready=serde_json::json!({"role":"party","event":"ready","id":id,
         "pid":std::process::id(),"preparation_seconds":prep.elapsed().as_secs_f64(),
-        "private_state_files_read":1,
+        "private_state_files_read":if synthetic {0} else {1},"synthetic_shares":synthetic,
         "added_public_cache_payload_bytes":worker.cfg.cache_payload_bytes()+fixed_interpolation_payload_bytes(),
         "memory":crate::simulation::process_memory(std::process::id())});
     eprintln!("{ready}");

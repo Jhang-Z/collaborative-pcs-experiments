@@ -26,6 +26,9 @@ def selected_json(path, keys):
 
 
 def execute_job(root, run, job, runtime, resources, settings, timeout, set_phase, command_wall_s=None):
+    if job['kind'].endswith('general'):
+        from general.backend import execute
+        return execute(root, run, job, runtime, resources, settings, timeout, set_phase, command_wall_s)
     work = run / 'private' / job['label']
     work.mkdir(mode=0o700)
     kind, n, size = job['kind'], job['N'], job['size']

@@ -56,7 +56,7 @@ impl Drop for ProcessWorker {
     fn drop(&mut self) { let _=self.child.kill(); let _=self.child.wait(); }
 }
 impl ProcessWorker {
-    fn new(out:&Path,id:usize,public:Arc<PublicPreprocessing>,previous_fds:&[i32])->Result<Self> {
+    fn new(out:&Path,id:usize,public:Arc<PublicPreprocessing>,previous_fds:&[i32],synthetic:bool)->Result<Self> {
         ensure!(fs::read_dir("/proc/self/task")?.count()==1,"public-only fork requires a single-thread parent");
         let mut up=[0;2];ensure!(unsafe{pipe(up.as_mut_ptr())}==0,"input pipe");
         let up_r=unsafe{File::from_raw_fd(up[0])};let up_w=unsafe{File::from_raw_fd(up[1])};
@@ -69,8 +69,10 @@ impl ProcessWorker {
                 if dup2(up_r.as_raw_fd(),0)<0 || dup2(down_w.as_raw_fd(),1)<0 {_exit(1);}
             }
             drop(up_r);drop(up_w);drop(down_r);drop(down_w);
-            let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-                crate::worker::run_stdio_with_public(id,out,public)));
+            let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if synthetic {crate::worker::run_stdio_benchmark_with_public(id,public)}
+                else {crate::worker::run_stdio_with_public(id,out,public)}
+            }));
             let code=match result {Ok(Ok(()))=>0,Ok(Err(e))=>{eprintln!("worker{id}: {e:#}");1},Err(_)=>1};
             unsafe{_exit(code)}
         }
@@ -106,25 +108,46 @@ struct Exchange {
 }
 pub(crate) struct Simulation {
     backend:Backend, exchanges:Vec<Exchange>, checkpoint:Instant,
-    active:bool, trace:PathBuf, ready_memory:Value,
+    active:bool, trace:PathBuf, ready_memory:Value, synthetic:bool,
 }
 impl Simulation {
     pub(crate) fn parties(&self)->usize {match &self.backend {Backend::Shared(w)=>w.len(),Backend::Processes(w)=>w.len()}}
+    fn processes(out:&Path,public:Arc<PublicPreprocessing>,synthetic:bool)->Result<Backend> {
+        let mut workers:Vec<ProcessWorker>=Vec::new();
+        for id in 0..public.ctx.n {
+            let fds:Vec<i32>=workers.iter().flat_map(|w|[w.input.as_ref().unwrap().as_raw_fd(),w.output.as_ref().unwrap().as_raw_fd()]).collect();
+            workers.push(ProcessWorker::new(out,id,Arc::clone(&public),&fds,synthetic)?);
+        }
+        Ok(Backend::Processes(workers))
+    }
     pub(crate) fn new(out:&Path,trace:&Path,public:Arc<PublicPreprocessing>,isolated:bool)->Result<Self> {
         let shape=Shape::read(out)?;
         let backend=if isolated {
-            let mut workers:Vec<ProcessWorker>=Vec::new();
-            for id in 0..shape.parties {
-                let fds:Vec<i32>=workers.iter().flat_map(|w|[w.input.as_ref().unwrap().as_raw_fd(),w.output.as_ref().unwrap().as_raw_fd()]).collect();
-                workers.push(ProcessWorker::new(out,id,Arc::clone(&public),&fds)?);
-            }
-            Backend::Processes(workers)
+            Self::processes(out,Arc::clone(&public),false)?
         } else {
             Backend::Shared((0..shape.parties).map(|id|Worker::with_preprocessing(id,out,Arc::clone(&public))).collect::<Result<Vec<_>>>()?)
         };
-        let mut sim=Self{backend,exchanges:vec![],checkpoint:Instant::now(),active:false,trace:trace.into(),ready_memory:Value::Null};
+        Ok(Self::from_backend(backend,trace,false))
+    }
+    pub(crate) fn benchmark(out:&Path,trace:&Path,public:Arc<PublicPreprocessing>)->Result<Self> {
+        let backend=if cfg!(target_os="linux") {
+            // Parent contains public state only. Each child creates exactly its
+            // own synthetic arrays, using a fresh worker-local random stream.
+            Self::processes(out,public,true)?
+        } else {
+            let mut rng=crate::prepare::entropy()?;
+            let workers=(0..public.ctx.n).map(|id| {
+                let sh=crate::benchmark::state(&public.cfg,&mut rng);
+                Worker::with_shares(id,sh,Arc::clone(&public))
+            }).collect::<Result<Vec<_>>>()?;
+            Backend::Shared(workers)
+        };
+        Ok(Self::from_backend(backend,trace,true))
+    }
+    fn from_backend(backend:Backend,trace:&Path,synthetic:bool)->Self {
+        let mut sim=Self{backend,exchanges:vec![],checkpoint:Instant::now(),active:false,trace:trace.into(),ready_memory:Value::Null,synthetic};
         sim.ready_memory=sim.memory_snapshot();
-        Ok(sim)
+        sim
     }
     fn pids(&self)->Vec<u32> {match &self.backend {Backend::Shared(_)=>vec![],Backend::Processes(w)=>w.iter().map(|w|w.child.id()).collect()}}
     fn memory_snapshot(&self)->Value {
@@ -139,7 +162,8 @@ impl Simulation {
             Backend::Processes(w)=>(w.iter().map(|w|w.ready.clone()).collect(),w.iter().map(|w|w.final_memory.clone()).collect()),
         };
         serde_json::json!({"backend":if matches!(self.backend,Backend::Shared(_)){"in-process-shared-heap"}else{"persistent-worker-processes"},
-            "public_preprocessing_storage":if matches!(self.backend,Backend::Shared(_)){"shared Arc public tables; private allocations remain per worker"}else{"single-thread public-only fork/COW; private shares loaded independently in children"},
+            "synthetic_shares":self.synthetic,
+            "public_preprocessing_storage":if matches!(self.backend,Backend::Shared(_)){"shared Arc public tables; private allocations remain per worker"}else if self.synthetic {"single-thread public-only fork/COW; synthetic state generated independently in each child"}else{"single-thread public-only fork/COW; private shares loaded independently in children"},
             "coordinator_pid":std::process::id(),"worker_process_ids":self.pids(),"worker_ready":ready,
             "ready_memory":self.ready_memory,"worker_final_memory":final_memory,
             "memory_scope":"per-process samples/high waters; never sum high waters as aggregate peak"})

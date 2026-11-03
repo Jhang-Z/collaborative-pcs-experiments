@@ -14,8 +14,9 @@ pub fn start(n:usize) {
 }
 pub fn stop()->Stats {WIRE.with(|w|w.borrow_mut().take().map_or(Stats::default(),|w|w.stats))}
 pub fn stats()->Stats {WIRE.with(|w|w.borrow().as_ref().map_or(Stats::default(),|w|w.stats))}
-pub fn party_count()->usize {WIRE.with(|w|w.borrow().as_ref().map_or(1,|w|w.client.len()))}
+pub fn party_count()->usize {WIRE.with(|w|w.borrow().as_ref().map_or_else(||if crate::execution_trace::recording(){crate::execution_trace::coordinator()}else{1},|w|w.client.len()))}
 pub fn enabled()->bool {!PAUSED.with(Cell::get)&&WIRE.with(|w|w.borrow().is_some())}
+fn tracing()->bool {!PAUSED.with(Cell::get)&&crate::execution_trace::enabled()}
 pub struct Pause(bool);
 pub fn pause()->Pause {Pause(PAUSED.with(|p|p.replace(true)))}
 impl Drop for Pause {fn drop(&mut self){PAUSED.with(|p|p.set(self.0));}}
@@ -23,6 +24,7 @@ fn send(mut stream:&TcpStream,data:&[u8]) {stream.write_all(&(data.len() as u64)
 fn recv(mut stream:&TcpStream)->Vec<u8> {let mut b=[0;8];stream.read_exact(&mut b).unwrap();let mut data=vec![0;u64::from_le_bytes(b) as usize];stream.read_exact(&mut data).unwrap();data}
 fn exchange(messages:Vec<Vec<u8>>,up:bool,input:bool)->Vec<Vec<u8>> {
     if !enabled(){return messages;}
+    let _ipc=crate::execution_trace::pause();
     WIRE.with(|cell|{
         let mut w=cell.borrow_mut();let w=w.as_mut().unwrap();assert_eq!(messages.len(),w.client.len());
         let start=Instant::now();let count=messages.iter().map(|x|x.len() as u64).sum::<u64>();
@@ -41,24 +43,28 @@ fn exchange(messages:Vec<Vec<u8>>,up:bool,input:bool)->Vec<Vec<u8>> {
     })
 }
 pub fn broadcast(data:&[u8]) {
+    if tracing(){crate::execution_trace::broadcast(data.len());}
     if !enabled(){return;}
     let n=WIRE.with(|w|w.borrow().as_ref().unwrap().client.len());
     for received in exchange(vec![data.to_vec();n],false,false){assert_eq!(received,data);}
 }
 pub fn values<T:bytemuck::Pod>(a:Vec<Vec<T>>,up:bool)->Vec<Vec<T>> {
+    if tracing(){let sizes={let _recorder=crate::execution_trace::pause();a.iter().map(|v|std::mem::size_of_val(v.as_slice())).collect::<Vec<_>>()};if up{crate::execution_trace::gather(&sizes);}else{crate::execution_trace::scatter(&sizes);}}
     if !enabled(){return a;}
     exchange(a.iter().map(|v|bytemuck::cast_slice(v).to_vec()).collect(),up,!up).into_iter().map(|b|b.chunks_exact(std::mem::size_of::<T>()).map(bytemuck::pod_read_unaligned).collect()).collect()
 }
 pub fn arrays<const K:usize>(a:Vec<[L;K]>)->Vec<[L;K]> {
-    if !enabled(){return a;}
+    if !enabled(){if tracing(){let sizes={let _recorder=crate::execution_trace::pause();vec![std::mem::size_of::<[L;K]>();a.len()]};crate::execution_trace::gather(&sizes);}return a;}
     values(a.into_iter().map(Vec::from).collect(),true).into_iter().map(|v|v.try_into().ok().unwrap()).collect()
 }
 pub fn scalars(a:Vec<L>)->Vec<L> {arrays(a.into_iter().map(|v|[v]).collect()).into_iter().map(|v|v[0]).collect()}
 pub fn hashes(a:Vec<Hash>)->Vec<Hash> {
+    if tracing(){let sizes={let _recorder=crate::execution_trace::pause();vec![std::mem::size_of::<Hash>();a.len()]};crate::execution_trace::gather(&sizes);}
     if !enabled(){return a;}
     exchange(a.into_iter().map(Vec::from).collect(),true,false).into_iter().map(|v|v.try_into().unwrap()).collect()
 }
 pub fn openings(mut a:Vec<Vec<Opening>>,queries:&[(usize,usize)],n:usize)->Vec<Vec<Opening>> {
+    if tracing(){let sizes={let _recorder=crate::execution_trace::pause();let mut sizes=vec![0;n];for(ops,&(i,_))in a.iter().zip(queries){for op in ops{sizes[i]+=std::mem::size_of_val(&op.values)+op.salt.len()+op.path.iter().map(|h|h.len()).sum::<usize>();}}sizes};crate::execution_trace::gather(&sizes);}
     if !enabled(){return a;}
     let mut messages=vec![Vec::new();n];
     for (ops,&(i,_)) in a.iter().zip(queries) {for op in ops {messages[i].extend_from_slice(bytemuck::cast_slice(&op.values));messages[i].extend(op.salt);for h in &op.path{messages[i].extend(h);}}}

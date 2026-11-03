@@ -1,6 +1,16 @@
-# Collaborative PCS and Keccak experiment artifact
+# Collaborative PCS and general-circuit experiment artifact
 
-Source and scripts for reproducing the four experiment groups of our collaborative multilinear PCS and binary-circuit PIOP. The runner builds the implementations, measures actual party computations, replays the same LAN/WAN model, verifies proofs where supported, and exports public measurements into one results bundle.
+Current collaborative multilinear PCS and binary-circuit PIOP sources, with a new random XOR/AND general-circuit reproduction entry and the four historical experiment groups. The runner builds the implementations, measures actual party computations, replays the same LAN/WAN model, verifies proofs where supported, and exports public measurements into one results bundle.
+
+## Latest general-circuit entry
+
+The current general implementation uses GENKEY05/GENPRF05, gamma=520, tau=4 and 3-bit index blocks. Run a small complete Ours/Pappas/Binius64 check:
+
+```bash
+./reproduce.sh --config configs/random50.json --smoke
+```
+
+See [RANDOM50.md](RANDOM50.md) for the six candidate circuit sizes, same-graph/input checks, native Pappas validation scope, memory reporting and failure handling. This source update does not publish the unfinished monitored matrix as final results. The historical configuration below remains explicitly gamma=871; new runs use the current source snapshot and are not byte-for-byte rebuilds of an earlier release. Use Git history to recover an earlier source identity.
 
 ## Requirements
 
@@ -10,11 +20,11 @@ Source and scripts for reproducing the four experiment groups of our collaborati
 - Enough available RAM and storage for the chosen workload. The complete matrix has large Pappas cases using roughly **100–110 GiB** on the original host. These are observations, not guaranteed bounds for every machine. A small smoke run is the first check on a new server.
 - A writable checkout and temporary storage, including writable `/dev/shm` for the unchanged Pappas PCS preparation boundary. Private prepared files are local run data, not part of the public bundle.
 
-The memory limit is **not fixed at 256 GB or 110 GiB**. Before each case the runner reads `MemAvailable` and all visible ancestor-cgroup limits, takes the smallest available capacity, and leaves **10%** as a system reserve. Inside the actual service it checks the service ancestors again, reduces the limit if necessary, then verifies the enforced limit before any proof starts. It disables swap for the case. If a configuration reaches the limit or fails verification, the runner retains the failure and stops; it never shrinks the circuit or subtracts memory-reclaim time.
+The memory limit is **not fixed at 256 GB or 110 GiB**. Before each case the runner reads `MemAvailable` and all visible ancestor-cgroup limits, takes the smallest available capacity, and leaves **10%** as a system reserve. Inside the actual service it checks the service ancestors again, reduces the limit if necessary, then verifies the enforced limit before any proof starts. It disables swap for the case. If a configuration reaches the limit or fails verification, the runner retains the failure (legacy groups stop; the random50 entry continues to subsequent selected cases); it never shrinks the circuit or subtracts memory-reclaim time.
 
-The **current confirmation focuses on Groups 1 and 4**. Groups 2 and 3 remain available as implementation paths, but their comparison settings are under discussion; including them does not endorse a finalized fair comparison.
+The **historical Keccak confirmation focuses on Groups 1 and 4**. Groups 2 and 3 remain available as implementation paths, but their comparison settings are under discussion; including them does not endorse a finalized fair comparison.
 
-## Quick start
+## Historical groups: quick start
 
 Clone this repository, enter its directory, then inspect the environment without installing anything:
 
@@ -94,7 +104,7 @@ Copy **`results-public.tar.gz`** to share a run. Do not publish the entire run d
 
 Each configuration has one completed sample. Groups 1 and 4 share identical proof jobs for ×512/1024, and a native single-core baseline is measured once per workload, giving **74 unique jobs**. This new reproduction generates fresh Keccak inputs and proof randomness; PCS uses the same deterministic shared test table across runs. Schemes receive the same input prefix and ordered public outputs within a run; exact numerical timings depend on the new hardware.
 
-Keccak inputs are private 200-byte states; only the first 256 output bits are public. This is a batch of Keccak-f permutations, **not** the Keccak-256 sponge. Our parameters are gamma=871, tau=4. LAN is 10 Gbit/s with 2 ms RTT; WAN is 0.2 Gbit/s with 50 ms RTT. PCS schemes retain their native fields, padding and security parameters; equal input bits do not imply identical internal representations.
+Keccak inputs are private 200-byte states; only the first 256 output bits are public. This is a batch of Keccak-f permutations, **not** the Keccak-256 sponge. These historical group configurations explicitly use gamma=871, tau=4. LAN is 10 Gbit/s with 2 ms RTT; WAN is 0.2 Gbit/s with 50 ms RTT. PCS schemes retain their native fields, padding and security parameters; equal input bits do not imply identical internal representations.
 
 ## How timing and validation work
 
@@ -113,7 +123,7 @@ python3 scripts/verify_source.py
 python3 -m unittest discover -s tests -v
 ```
 
-The default configuration is intended for the paper comparison. For a different study, copy it and pass `--config /path/to/custom.json`; dimension checks in the actual implementations still apply. A larger memory budget does not remove Binius64's native wiring-address limit, so the default native comparison remains ×512/1024.
+The default configuration retains the historical four-group comparison settings; it is not a statement of the current manuscript experiment selection. For a different study, copy it and pass `--config /path/to/custom.json`; dimension checks in the actual implementations still apply. A larger memory budget does not remove Binius64's native wiring-address limit, so the default native comparison remains ×512/1024.
 
 ## Troubleshooting
 

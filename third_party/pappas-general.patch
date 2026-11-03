@@ -1,0 +1,4499 @@
+--- a/src/Distributed_Sumcheck.cpp
++++ b/src/Distributed_Sumcheck.cpp
+@@ -1,3 +1,4 @@
++#include "index_binding.hpp"
+ #include "MPI_utils.hpp"
+ #include "Distributed_Sumcheck.h"
+ #include "timer.hpp"
+@@ -46,7 +47,7 @@
+         MPI_Request req;
+         MPI_Isend(send_buff.data(),send_buff.size(),MPI_UINT64_T,0,0,MPI_COMM_WORLD,&req);
+         //MPI_Send(buff_u64.data(),buff_u64.size(),MPI_UINT64_T,0,0,MPI_COMM_WORLD);
+-        //MPI_Wait(&req,MPI_STATUS_IGNORE);
++        MPI_Wait(&req,MPI_STATUS_IGNORE);
+     }
+        
+     if(rank == 0)cm += (N-1)*8*buff_u64.size()/1024.0;
+@@ -1024,20 +1025,22 @@
+     timer smch_timer;
+     smch_timer.start();
+     int vectors = input.size();
+-	int depth = (int)log2(next_pow2(input[0].size()))-multree_offset;
++    if(input[0].size()<2)throw std::runtime_error("native product requires two entries");
++    const int active_multree_offset=std::min(multree_offset,int(log2(input[0].size()))-1);
++	int depth = (int)log2(next_pow2(input[0].size()))-active_multree_offset;
+ 	int size = input[0].size();
+     for(int i = 0; i < input.size(); i++){
+ 		if(input[i].size() != size){
+ 			printf("Error in mul tree sumcheck, no equal size vectors %d,%d\n",input[i].size(),size);
+ 			exit(-1);
+ 		}
+-        input[i].resize(1<<depth,F(1));
++        input[i].resize(size,F(1));
+ 	}
+ 
+ 	if(vectors != 1<<((int)log2(vectors))){
+ 		vectors = 1<<((int)log2(vectors)+1);
+ 		int old_vector_size = input.size();
+-		vector<F> temp_vector(1<<depth,F(0));
++		vector<F> temp_vector(size,F(0));
+ 		for(int i = 0; i < vectors-old_vector_size; i++){
+ 			input.push_back(temp_vector);
+ 		}
+@@ -1170,13 +1173,13 @@
+ 	F sum = eval_claim.first;//evaluate_vector(transcript[depth-1],r);
+     r = eval_claim.second;
+     vector<F> r1,r2;
+-    for(int i = 0; i < multree_offset; i++){
++    for(int i = 0; i < active_multree_offset; i++){
+         r2.push_back(r[i]);
+     }
+-    for(int i = multree_offset; i < (int)log2(N)+multree_offset; i++){
++    for(int i = active_multree_offset; i < (int)log2(N)+active_multree_offset; i++){
+         r1.push_back(r[i]);
+     }
+-    for(int  i = multree_offset+ r1.size(); i < r.size(); i++){
++    for(int  i = active_multree_offset+ r1.size(); i < r.size(); i++){
+         r2.push_back(r[i]);
+     }
+     double smc_time = smch_timer.get_time();
+@@ -1247,7 +1250,7 @@
+ pair<F,vector<vector<F>>> prove_product_opt(vector<vector<F>> &input, vector<F> &output, int N, vector<F> &evals){
+     int rank;
+     MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+-    int total_size;
++    int total_size=0;
+     int size;
+     pt_cp.start();
+     
+@@ -1675,6 +1678,7 @@
+     int rank;
+     MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+     //pt_cp.start();
++    sync_native_fs(N);
+     vector<F> challenges(3);
+     clock_t t1 = clock();
+     for(int i = 0; i < 3; i++) challenges[i] = hash_to_field({0}); 
+@@ -1683,7 +1687,9 @@
+     
+     //vector<F> test_v = Tr[13];
+     
++    vector<size_t> original_lengths;for(auto&v:Tr)original_lengths.push_back(v.size());
+     sort_transcript(Tr, order);
++    {vector<int> inverse(order.size());for(int j=0;j<order.size();j++)inverse[order[j]]=j;order=inverse;}
+     vector<F> debug_evals;
+     pt_cp.end();
+     
+@@ -1693,11 +1699,11 @@
+     if(rank == 0){
+         vector<F> organized_output(output.size());
+         for(int i = 0; i < output.size(); i++){
+-            organized_output[i] = output[order[i]];
++            organized_output[order[i]] = output[i];
+         }
+         for(int i = 0; i < 6; i++){
+             if(organized_output[2*i]*organized_output[2*i+1+12] != organized_output[2*i+1]*organized_output[2*i+12]){
+-                printf("Error phase 2 %d\n",i);
++                throw std::runtime_error("sparse multiset product mismatch");
+             }
+         }
+     }
+@@ -1718,6 +1724,7 @@
+     for(int i = 0; i < data.size(); i++) polys.push_back(convert_to_field(data[i].FINAL_FR2));
+     
+     vector<F> evals = batch_distributed_eval_opt(polys, r, claim.second[2], N);
++    capture_index_endpoints(evals,polys,r,claim.second[2],N);
+     pt_cp.start();
+     
+     vector<F> beta_evals;
+@@ -1774,98 +1781,22 @@
+             //}
+         }
+         
+-        //if(evaluate_vector(Tr_evals,claims.second[1]) != claims.first){
+-        //    printf("Sparse Eval Error 1\n");
+-        //}
+-    }
+-    order.clear();
++        check_product_endpoint(Tr_evals,order,original_lengths,r,claim.first);
++    }
+     vector<F> v1,v2,v3,ones(N,1);
+-    vector<vector<F>> _beta2_sorted,_beta1_sorted = beta1;
+-    vector<F> aggr_challenges = {a,b,c};
+-    sort_transcript(_beta1_sorted,order);    
+-    for(int i = 0; i < beta2.size(); i++) _beta2_sorted.push_back(beta2[order[i]]);
+-    
+-    for(int i = 0; i < beta1.size(); i++){
+-        v1.insert(v1.end(),_beta1_sorted[i].begin(),_beta1_sorted[i].end());
+-        v2.insert(v2.end(),_beta2_sorted[i].begin(),_beta2_sorted[i].end());
+-        //vector<F> c_buff(_beta1_sorted[i].size(),aggr_challenges[order[i]]);
+-        //v3.insert(v3.end(),c_buff.begin(),c_buff.end());
+-    }
+-    v1.resize(next_pow2(v1.size()),F(0));v2.resize(next_pow2(v2.size()),F(0));
+-    //v3.resize(next_pow2(v3.size()),F(0));
+-    
+-    
+-    int ctr = 0;
+-    v3.resize(next_pow2(real_idx_dim[0]+real_idx_dim[1]+real_idx_dim[2])/N,F(0));
+-    
+-    for(int j = 0; j < 3; j++){
+-        if((rank+1)*next_pow2(real_idx_dim[order[j]])/N <= real_idx_dim[order[j]]){
+-            for(int i = 0 ; i < next_pow2(real_idx_dim[order[j]])/N; i++){
+-                v3[ctr] = aggr_challenges[order[j]];
+-                ctr++;
+-            }
+-        }else if(rank*next_pow2(real_idx_dim[order[j]])/N < real_idx_dim[order[j]]){
+-            
+-            int offset = real_idx_dim[order[j]] - (rank)*next_pow2(real_idx_dim[order[j]])/N;
+-            for(int i = 0 ; i < real_idx_dim[order[j]] - (rank)*next_pow2(real_idx_dim[order[j]])/N; i++){
+-                v3[ctr] = aggr_challenges[order[j]];
+-                ctr++;
+-            }
+-            for(int i = 0; i < (next_pow2(real_idx_dim[order[j]])/N) -offset; i++) ctr++;
+-            //ctr = (j+1)*next_pow2(real_idx_dim[order[j]])/N;
+-            
+-        }else{
+-            for(int i = 0 ; i < next_pow2(real_idx_dim[order[j]])/N; i++){
+-                v3[ctr] = 0;
+-                ctr++;
+-            }
+-        }
+-    }
+-    /*
+-    if(rank != N-1){
+-
+-        int ctr = 0;
+-        
+-        for(int i = 0 ; i < next_pow2(real_idx_dim[order[1]])/N; i++){
+-            v3[ctr] = aggr_challenges[order[1]];
+-            ctr++;
+-        }
+-        for(int i = 0 ; i < next_pow2(real_idx_dim[order[2]])/N; i++){
+-            v3[ctr] = aggr_challenges[order[2]];
+-            ctr++;
+-        }
+-    }else{
+-        int ctr = 0;
+-        
+-        for(int i = 0 ; i < real_idx_dim[order[0]] - (N-1)*next_pow2(real_idx_dim[order[0]])/N; i++){
+-            v3[ctr] = aggr_challenges[order[0]];
+-            ctr++;
+-        }
+-        
+-        ctr = next_pow2(real_idx_dim[order[0]])/N;
+-        for(int i = 0 ; i < real_idx_dim[order[1]] - (N-1)*next_pow2(real_idx_dim[order[1]])/N; i++){
+-            v3[ctr] = aggr_challenges[order[1]];
+-            ctr++;
+-        }
+-        ctr = 2*next_pow2(real_idx_dim[order[1]])/N;
+-        
+-        for(int i = 0 ; i < real_idx_dim[order[2]] - (N-1)*next_pow2(real_idx_dim[order[2]])/N; i++){
+-            v3[ctr] = aggr_challenges[order[2]];
+-            ctr++;
+-        }
+-    }    
+-    */
+-    
++    vector<F> aggr_challenges={a,b,c};
++    actual_cubic_vectors(beta1,beta2,aggr_challenges,v1,v2,v3,N);
+     pt_cp.end();
+     timer eval;
+     eval.reset();
+         
+     eval.start();
+     vector<pair<F,vector<F>>>  beta_evals2 =  _cubic_sumcheck(y,v1,v2,v3,ones,N);
++    check_public_cubic(beta_evals2[2].first,beta_evals2[2].second,aggr_challenges,N);
+     eval.end();
+     if(rank == 0) printf("          Final Sumcheck: %lf\n",eval.get_time());
+     //for(int i = 0; i < )
+-    F __r = hash_to_field({});
++    F __r = endpoint_mix_challenge({beta_evals2[0].first,beta_evals2[1].first,beta_evals2[2].first},N);
+     
+     r1.clear();r2.clear();
+     
+--- a/src/MPI_utils.cpp
++++ b/src/MPI_utils.cpp
+@@ -1736,7 +1736,7 @@
+         vector<u64> buff_u64;
+     
+         MPI_Request req;
+-        buff_u64.resize(2*((1<<logn) + 3*(1<<logm))/k);
++        buff_u64.resize(2*((size_t(1)<<logn) + 3*(size_t(1)<<logm))/k);
+         MPI_Irecv(buff_u64.data(),buff_u64.size(),MPI_UINT64_T,0,0,MPI_COMM_WORLD,&req);
+         MPI_Wait(&req,MPI_STATUS_IGNORE);
+         field_vector_deserialize(buff_u64,buff);    
+--- a/src/coPCS.cpp
++++ b/src/coPCS.cpp
+@@ -1,3 +1,4 @@
++#include <stdexcept>
+ #include "coPCS.h"
+ #include "Fiat_Shamir.h"
+ #include "Distributed_Sumcheck.h"
+@@ -542,6 +543,7 @@
+                          F y, int l, int k, int N, double &ps, bool secret_shared, bool verify){
+     
+     pt_cp.start();
++    const size_t actual_rate=codeword[0].size()/row_data[0].size();
+     int rounds = (int)log2(row_data[0].size())-1;
+     vector<vector<vector<F>>> folded_codewords(rounds);
+     vector<vector<MT>> eval_MT(rounds);
+@@ -592,7 +594,7 @@
+         //printf("(%lld,%lld),(%lld,%lld),(%lld,%lld)\n",H.a.real,H.a.img,H.b.real,H.b.img,H.c.real,H.c.img);
+         //H = aggregate_quadratic_poly(H, v2,  k,  _k,  N);
+         if(H.eval(0) + H.eval(1) != y && verify){
+-            printf("Error in open round %d\n",i);
++            throw std::runtime_error("native PC verification rejected");
+             //return;
+         }
+         challenges[i] = F::_random();
+@@ -643,7 +645,7 @@
+             vector<vector<F>> _final_codeword(N);
+             for(int i = 0; i < N; i++){
+                 
+-                _final_codeword[i].resize(final_codeword[i].size()/2,0);
++                _final_codeword[i].resize(final_codeword[i].size()/actual_rate,0);
+                 fft(final_codeword[i],(int)log2(final_codeword[i].size()),true);
+                 for(int j = 0; j < _final_codeword[i].size(); j++){
+                     _final_codeword[i][j] = final_codeword[i][j];
+@@ -687,7 +689,7 @@
+             for(int i = 0; i < arr1.size(); i++) temp += arr1[i]*arr2[i];
+             
+             if(temp != y && verify){
+-                printf("ERROR, PC verification failed (%lld,%lld),(%lld,%lld)\n",temp.real,temp.img,y.real,y.img);
++                throw std::runtime_error("native PC verification rejected");
+             }else{
+                 //printf("PC Verification Success\n");
+             }
+@@ -931,7 +933,7 @@
+         
+         H = aggregate_quadratic_poly(H, beta2,  k,  _k,  N);
+         if(verify && H.eval(0) + H.eval(1) != y + aggr_challenges[i]*y_mask[i]){
+-            printf("> Error in open round %d\n",i);
++            throw std::runtime_error("native PC verification rejected");
+             return;
+         }
+         pt_cp.start();
+@@ -1087,13 +1089,14 @@
+ void open_plaintext(vector<F> &codeword, vector<F> &row_data,
+                     vector<F> &v1, vector<F> &v2, MT &Com, F y, int l, int k, int N, double &ps, bool secret_shared, bool verify){
+ 
++    const size_t actual_rate=codeword.size()/row_data.size();
+     pt_cp.start();
+     int rank;
+     MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+     vector<F> old_v2 = v2;
+-    if(!secret_shared && k != N){
++    if(!secret_shared){
+         fft(v2,(int)log2(v2.size()),true);
+-        vector<F> _v2(2*v2.size(),F(0));
++        vector<F> _v2(N,F(0));
+         
+         for(int i = 0; i < k; i++){
+             _v2[i*N/k] = v2[i];
+@@ -1133,7 +1136,7 @@
+             //H = aggregate_quadratic_poly(H, v2,  k,  _k,  N);
+             pt_cp.start();
+             if(H.eval(0) + H.eval(1) != y && verify){
+-                printf("Error in open round %d\n",i);
++                throw std::runtime_error("native PC verification rejected");
+                 //return;
+             }
+             challenges[i] = hash_to_field({H.a,H.b,H.c});
+@@ -1208,7 +1211,7 @@
+             vector<vector<F>> _final_codeword(N);
+             for(int i = 0; i < N; i++){
+                 
+-                _final_codeword[i].resize(final_codeword[i].size()/2,0);
++                _final_codeword[i].resize(final_codeword[i].size()/actual_rate,0);
+                 fft(final_codeword[i],(int)log2(final_codeword[i].size()),true);
+                 for(int j = 0; j < _final_codeword[i].size(); j++){
+                     _final_codeword[i][j] = final_codeword[i][j];
+@@ -1252,7 +1255,7 @@
+             for(int i = 0; i < arr1.size(); i++) temp += arr1[i]*arr2[i];
+             
+             if(temp != y && verify){
+-                printf("ERROR, PC verification failed (%lld,%lld),(%lld,%lld)\n",temp.real,temp.img,y.real,y.img);
++                throw std::runtime_error("native PC verification rejected");
+             }else{
+                 //printf("PC Verification Success\n");
+             }
+@@ -1276,9 +1279,9 @@
+     
+     vector<vector<F>> old_v2 = v2;
+     for(int i = 0; i < codeword.size(); i++){
+-        if(!secret_shared[i] && k[i] != N){
++        if(!secret_shared[i]){
+             fft(v2[i],(int)log2(v2[i].size()),true);
+-            vector<F> _v2(2*v2[i].size(),F(0));
++            vector<F> _v2(N,F(0));
+             
+             for(int j = 0; j < k[i]; j++){
+                 _v2[j*N/k[i]] = v2[i][j];
+@@ -1335,7 +1338,7 @@
+         for(int j = 0; j < batch_size; j++){
+             if(rounds[j] > i){
+                 if(H[j].eval(0) + H[j].eval(1) != y[j] && verify[j]){
+-                    printf("Error in open round %d,%d, (%lld,%lld)\n",i,rank,(H[j].eval(0) + H[j].eval(1)).real,(H[j].eval(0) + H[j].eval(1)).img);
++                    throw std::runtime_error("native PC verification rejected");
+                     //exit(-1);
+                 }
+                 //if(rank == 1 && verify[j]) printf("%d (%lld,%lld)\n",i,(H[j].eval(0) + H[j].eval(1)).real,(H[j].eval(0) + H[j].eval(1)).img);
+--- a/src/coPIOP.cpp
++++ b/src/coPIOP.cpp
+@@ -1,3 +1,8 @@
++extern "C" void simtrace_begin() __attribute__((weak));
++extern "C" void simtrace_end() __attribute__((weak));
++extern "C" void simtrace_phase(int) __attribute__((weak));
++#include "nand_input.hpp"
++#include "index_binding.hpp"
+ #pragma once
+ #include "coPIOP.h"
+ #include "coSumcheck.h"
+@@ -103,6 +108,7 @@
+ // 0: Default, multree
+ // 1: Random circuit
+ void generate_R1CS_matrixes(size_t size, int type){
++    if(nand_active()){ nand_matrices(); return; }
+     int n = size;
+     int m = 0;
+     int counter = 0;
+@@ -553,22 +559,7 @@
+ }
+ 
+ void commit_sparse_eval_witness(vector<vector<F>> &beta1, vector<vector<F>> &beta2,vector<F> &codeword ,vector<F> &row_data, MT &Com, int k, int N){
+-    vector<F> data;
+-    vector<vector<F>> buff;
+-    buff = beta1;
+-    
+-    vector<int> order;
+-
+-    sort_transcript(buff, order);
+-    
+-    data = convert2vector(buff);
+-    buff.clear();
+-    data.resize(next_pow2(data.size()),F(0));
+-    
+-    //for(int i = 0; i < beta1.size(); i++) data.insert(data.end(),beta1[i].begin(),beta1[i].end());
+-    for(int i = 0; i < beta2.size(); i++) data.insert(data.end(),beta2[order[i]].begin(),beta2[order[i]].end());
+-    data.resize(next_pow2(data.size()),F(0));
+-    plaintext_commit(data, codeword,row_data,Com,k,N);
++    actual_aux_commit(beta1,beta2,codeword,row_data,Com,k,N);
+ }
+ 
+ void open_sparse_eval(vector<F> &codeword, vector<F> &row_data, vector<F> r, MT &Com, F y,int l, int k, int N, double &ps){
+@@ -619,7 +610,9 @@
+ 
+     sparse_eval_timer.reset();
+     sparse_eval_timer.start();
++    open_aux_gkr(codeword,row_data,Com,N,ps);
+     open_sparse_eval(codeword,row_data,claim.second,Com,claim.first,796,N/2,N,ps);
++    sync_native_fs(N);
+     sparse_eval_timer.end();
+     if(rank == 0) printf("      Phase 5.2 (Open): %lf\n",sparse_eval_timer.get_time());
+     
+@@ -662,6 +655,7 @@
+     if(rank == 0) printf("      Phase 5.1 (Sumcheck): %lf, Local time: %lf, Rounds: %d\n",sparse_eval_timer.get_time(),pt_cp.get_time()-temp,com_rounds-gkr_rounds);
+ 
+     sparse_eval_timer.reset();
++    open_aux_gkr(codeword,row_data,Com,N,ps);
+     return claim;
+     //sparse_eval_timer.start();
+     //open_sparse_eval(codeword,row_data,claim.second,Com,claim.first,500,N/2,N,ps);
+@@ -827,31 +821,12 @@
+ 
+ 
+ void init_dummy_index_commitment(vector<sparse_eval_data> &data, vector<F> &row_data, vector<F> &codeword, MT &index_Com, int rate, int N){
+-    int size = 0;
+-    for(int i = 0; i < data.size(); i++){
+-        size += data[i].FINAL_FR1.size();
+-        size += data[i].FINAL_FR2.size();
+-        size += data[i].IDX1.size();
+-        size += data[i].IDX2.size();
+-        size += data[i].RD1.size();
+-        size += data[i].RD2.size();
+-    }
+-    size = next_pow2(size);
+-    row_data = generate_randomness(size);
+-    codeword = generate_randomness(rate*size);
+-    distributed_MT(codeword, index_Com, N);
+-    
++    actual_index_commit(data,row_data,codeword,index_Com,rate,N);
+ }
+ 
+ 
+ void open_index(vector<F> &index_data,vector<F> &codeword, MT &index_Com, int N,double &ps){
+-    pt_cp.start();
+-    vector<F> r1,r2,beta1,beta2;
+-    for(int i = 0; i < (int)log2(index_data.size()); i++) r1.push_back(hash_to_field({}));
+-    for(int i = 0; i < (int)log2(N); i++) r2.push_back(hash_to_field({}));
+-    precompute_beta(r1,beta1);precompute_beta(r2,beta2);
+-    pt_cp.end();
+-    open_plaintext(codeword,index_data,beta1,beta2,index_Com,F(0),100,N,N,ps,false,false);
++    actual_index_open(index_data,codeword,index_Com,N,ps);
+ }
+ 
+ void batch_open_PIOP(vector<pair<F,vector<F>>> claims, vector<vector<F>> &row_data,vector<vector<F>> &codeword, vector<MT> &Com, int k, int N,double &ps){
+@@ -868,9 +843,7 @@
+     for(int i = r2.size(); i < claims[1].second.size() ; i++) r1.push_back(claims[1].second[i]);    
+     precompute_beta(r1,v1[1]);precompute_beta(r2,v2[1]);r1.clear();r2.clear();
+ 
+-    for(int i = 0; i < (int)log2(row_data[2].size()); i++) r1.push_back(hash_to_field({}));
+-    for(int i = 0; i < (int)log2(N); i++) r2.push_back(hash_to_field({}));
+-    precompute_beta(r1,v1[2]);precompute_beta(r2,v2[2]);
++    F index_claim; actual_index_weights(v1[2],v2[2],index_claim,N);
+ 
+     pt_cp.end();
+     
+@@ -878,7 +851,7 @@
+     
+ 
+     
+-    batch_open(codeword,row_data,v1,v2,Com,{claims[0].first,claims[1].first,F(1)},{500,796,100},{k,N/2,N},N,ps,{true,false,false},{true,true,false});
++    batch_open(codeword,row_data,v1,v2,Com,{claims[0].first,claims[1].first,index_claim},{500,796,100},{k,N/2,N},N,ps,{true,false,false},{true,true,true});
+ }
+ 
+ 
+@@ -915,7 +888,9 @@
+     com_rounds = 0;
+     cm = 0.0;
+     
++    {int sr;MPI_Comm_rank(MPI_COMM_WORLD,&sr);if(sr==0)printf("{\"event\":\"online_start\"}\n");}
+     pt_cp.reset();
++    if(simtrace_begin)simtrace_begin();
+     pt.start();
+     pt_cpu.start();
+     temp_pc.start();
+@@ -940,22 +915,26 @@
+     if(rank == 0)printf("1 >>>>>>>> %lf\n",cm/1024.0);
+     
+     if(rank == 0)printf("Phase 1: %lf, rounds: %d\n",temp_pc.get_time(),com_rounds);temp_pc.reset();
++    if(simtrace_phase)simtrace_phase(1);
+     temp_pc.start();
+     vector<pair<F,vector<F>>> claims1 = prove_phase1(vL, vR, vO, rL, rR, rO,R3,R4, N,_k, k, ps);
+     temp_pc.end();
+     if(rank == 0)printf("Phase 2: %lf, rounds: %d\n",temp_pc.get_time(),com_rounds);temp_pc.reset();
++    if(simtrace_phase)simtrace_phase(2);
+     F a,b,c;
+     if(rank == 0)printf("1 >>>>>>>> %lf\n",cm/1024.0);
+     temp_pc.start();
+     vector<pair<F,vector<F>>> claims2 = prove_phase2(witness, r_witness, rL, rR, rO, RA, RB, RC,R1,R2, claims1[0].second, claims1[0].first,claims1[1].first,claims1[2].first,N, size, _k, k, a,b,c, ps);
+     temp_pc.end();
+     if(rank == 0)printf("Phase 3: %lf, rounds: %d\n",temp_pc.get_time(),com_rounds);temp_pc.reset();
++    if(simtrace_phase)simtrace_phase(3);
+     
+     if(rank == 0)printf("1 >>>>>>>> %lf\n",cm/1024.0);
+     temp_pc.start();
+     aggregate_random_evaluations(claims1,  claims2, R,  _R,codeword_R,_codeword_R,CR ,a,b,c, N, k,  _k,ps);
+     temp_pc.end();
+     if(rank == 0)printf("Phase 4: %lf, rounds: %d\n",temp_pc.get_time(),com_rounds);temp_pc.reset();
++    if(simtrace_phase)simtrace_phase(4);
+     if(rank == 0)printf("2 >>>>>>>> %lf\n",cm/1024.0);
+     
+     //return;
+@@ -965,6 +944,7 @@
+                              claims1[0].second,claims2[0].second,index,N,ps);
+         temp_pc.end();
+         if(rank == 0)printf("Phase 5: %lf\n",temp_pc.get_time());temp_pc.reset();
++    if(simtrace_phase)simtrace_phase(5);
+     
+         
+         
+@@ -972,6 +952,7 @@
+         open_index(index_data,index_codeword, index_Com, N,ps);
+         temp_pc.end();
+         if(rank == 0)printf("Phase 6 (Open): %lf\n",temp_pc.get_time());temp_pc.reset();
++    if(simtrace_phase)simtrace_phase(6);
+     
+     }
+     temp_pc.start();
+@@ -980,8 +961,10 @@
+     temp_pc.end();
+     if(rank == 0)printf("Phase 7: %lf, rounds: %d\n",temp_pc.get_time(),com_rounds);temp_pc.reset();
+     pt.end();
++    if(simtrace_end)simtrace_end();
+     pt_cpu.end();
+     MPI_Barrier(MPI_COMM_WORLD);
++    {double local=pt.get_time(), maximum=0; MPI_Allreduce(&local,&maximum,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD); if(rank==0)printf("{\"event\":\"online_complete\",\"max_rank_seconds\":%.9f}\n",maximum);}
+     if(rank == 0){
+         vector<double> buff(3);
+         printf("Id : %d, Pt: %lf, CPU Only Pt: %lf, Computation only: %lf, Vt: %lf\n", rank, pt.get_time(),pt_cpu.get_time(),pt_cp.get_time(),vt.get_time());
+@@ -1050,7 +1033,9 @@
+     MPI_Barrier(MPI_COMM_WORLD);
+     cm = 0.0;
+     com_rounds = 0;
++    {int sr;MPI_Comm_rank(MPI_COMM_WORLD,&sr);if(sr==0)printf("{\"event\":\"online_start\"}\n");}
+     pt_cp.reset();
++    if(simtrace_begin)simtrace_begin();
+     pt.start();
+     pt_cpu.start();
+     temp_pc.start();
+@@ -1127,8 +1112,10 @@
+     temp_pc.end();
+     if(rank == 0)printf("Phase 7 (Open Witness): %lf, rounds: %d\n",temp_pc.get_time(),com_rounds-temp_rounds);temp_pc.reset();
+     pt.end();
++    if(simtrace_end)simtrace_end();
+     pt_cpu.end();
+     MPI_Barrier(MPI_COMM_WORLD);
++    {double local=pt.get_time(), maximum=0; MPI_Allreduce(&local,&maximum,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD); if(rank==0)printf("{\"event\":\"online_complete\",\"max_rank_seconds\":%.9f}\n",maximum);}
+     if(rank == 0){
+         vector<double> buff(3);
+         printf("Id : %d, Pt: %lf, CPU Only Pt: %lf, Computation only: %lf, Vt: %lf\n", rank, pt.get_time(),pt_cpu.get_time(),pt_cp.get_time(),vt.get_time());
+--- /dev/null
++++ b/src/index_binding.cpp
+@@ -0,0 +1,93 @@
++#include "index_binding.hpp"
++#include "coPCS.h"
++#include "Fiat_Shamir.h"
++#include "MPI_utils.hpp"
++#include "utils.hpp"
++#include "timer.hpp"
++#include <stdexcept>
++#include <algorithm>
++#include <cstdlib>
++extern F prev_challenge;
++extern std::vector<int> real_idx_dim;
++extern double cm;
++extern int com_rounds;
++extern timer pt_cp;
++namespace {
++size_t index_size=0,aux_side=0;
++std::vector<size_t> index_lengths,index_offsets,aux_lengths,aux_padded,aux_offsets;
++std::vector<F> gkr_q,gkr_rank,index_batch,aux_batch;
++F index_value,aux_value;
++size_t lg(size_t x){size_t n=0;while(x>1){if(x&1)throw std::runtime_error("nonpower binding dimension");x/=2;++n;}return n;}
++void require(bool b,const char*s){if(!b)throw std::runtime_error(s);}
++F pad(F e,size_t len,size_t B,const std::vector<F>&q){for(size_t b=lg(len);b<lg(B);++b)e*=F(1)-q[b];return e;}
++std::vector<F> challenges(const std::vector<F>&e,int count,int tag,int N){
++ int rank;MPI_Comm_rank(MPI_COMM_WORLD,&rank);std::vector<F> r;
++ if(rank==0){hash_to_field(e);for(int j=0;j<count;++j)r.push_back(hash_to_field({F(tag),F(j+1)}));r.push_back(prev_challenge);}
++ std::vector<u64> buff;if(rank==0)field_vector_serialize(r,buff);else buff.resize(2*(count+1));
++ myBcast(buff,N);++com_rounds;if(rank)field_vector_deserialize(buff,r);prev_challenge=r.back();r.pop_back();return r;
++}
++size_t power2(size_t x){size_t n=1;while(n<x)n*=2;return n;}
++// Each segment starts at a multiple of k. Its shared low-k evaluation weights
++// factor from a publicly constructed, otherwise general high-coordinate vector.
++// This is a linear-functional opening; no C-sized weight table is transmitted.
++void segmented_weights(const std::vector<size_t>&lengths,const std::vector<size_t>&offsets,size_t size,const std::vector<F>&mix,int k,int N,std::vector<F>&v1,std::vector<F>&v2){
++ require(lengths.size()==offsets.size()&&mix.size()>=lengths.size(),"segment dimensions");size_t low=lg(k);require(gkr_q.size()>=low,"segment GKR point");
++ precompute_beta(std::vector<F>(gkr_q.begin(),gkr_q.begin()+low),v2);std::vector<F> ranks;precompute_beta(gkr_rank,ranks);require(ranks.size()==size_t(N),"GKR rank dimension");v1.assign(size*N/k,F(0));
++ for(size_t j=0;j<lengths.size();j++){
++  require(lengths[j]>=size_t(k)&&lengths[j]%k==0&&offsets[j]%k==0&&offsets[j]+lengths[j]<=size,"unaligned public segment");
++  std::vector<F> b;precompute_beta(std::vector<F>(gkr_q.begin()+low,gkr_q.begin()+lg(lengths[j])),b);
++  for(int r=0;r<N;r++)for(size_t h=0;h<b.size();h++)v1[r*(size/k)+offsets[j]/k+h]=ranks[r]*mix[j]*b[h];
++ }
++}
++void commit(std::vector<F>&data,std::vector<F>&row,std::vector<F>&cw,MT&Com,int k,int N,int inv_rate){
++ require(data.size()%k==0,"plaintext divisibility");pt_cp.start();size_t groups=data.size()/k;
++ std::vector<std::vector<F>> matrix(N,std::vector<F>(groups));
++ for(size_t i=0;i<groups;i++){std::vector<F> a(N,F(0));for(int j=0;j<k;j++)a[j]=data[i*k+j];fft(a,lg(N),false);for(int j=0;j<N;j++)matrix[j][i]=a[j];}
++ std::vector<F> flat=convert2vector(matrix);std::vector<u64> send,recv;field_vector_serialize(flat,send);recv.resize(send.size());pt_cp.end();
++ MPI_Alltoall(send.data(),2*groups,MPI_UINT64_T,recv.data(),2*groups,MPI_UINT64_T,MPI_COMM_WORLD);cm+=8*send.size()/1024.0;++com_rounds;
++ pt_cp.start();field_vector_deserialize(recv,row);cw=row;cw.resize(inv_rate*cw.size(),F(0));fft(cw,lg(cw.size()),false);pt_cp.end();distributed_MT(cw,Com,N);
++}
++F prefix(size_t end,const std::vector<F>&q){
++ if(end==0)return F(0);if(end>=(size_t(1)<<q.size()))return F(1);
++ F ans(0),equal(1);for(int b=int(q.size())-1;b>=0;--b){if((end>>b)&1){ans+=equal*(F(1)-q[b]);equal*=q[b];}else equal*=F(1)-q[b];}return ans;
++}
++}
++void actual_index_commit(std::vector<sparse_eval_data>&data,std::vector<F>&row,std::vector<F>&cw,MT&Com,int inv_rate,int N){
++ std::vector<std::vector<F>> p;index_lengths.clear();index_offsets.clear();size_t total=0,author_total=0;
++ for(auto&d:data)for(auto*v:{&d.FINAL_FR1,&d.FINAL_FR2,&d.IDX1,&d.IDX2,&d.RD1,&d.RD2}){p.push_back(convert_to_field(*v));index_offsets.push_back(total);index_lengths.push_back(std::max(size_t(N),v->size()));total+=index_lengths.back();author_total+=v->size();}
++ index_size=power2(total);std::vector<F> raw(index_size,F(0));for(size_t j=0;j<p.size();j++)std::copy(p[j].begin(),p[j].end(),raw.begin()+index_offsets[j]);
++ int rank;MPI_Comm_rank(MPI_COMM_WORLD,&rank);if(rank==0)printf("{\"event\":\"compact_static_layout\",\"actual_local_coefficients\":%zu,\"author_pow2\":%zu,\"encoded_local_coefficients\":%zu}\n",author_total,power2(author_total),index_size);
++ commit(raw,row,cw,Com,N,N,inv_rate);
++}
++void actual_aux_commit(std::vector<std::vector<F>>&b1,std::vector<std::vector<F>>&b2,std::vector<F>&cw,std::vector<F>&row,MT&Com,int k,int N){
++ aux_lengths.clear();aux_padded.clear();aux_offsets.clear();size_t total=0,author_total=0;
++ for(auto&v:b1){aux_lengths.push_back(v.size());aux_offsets.push_back(total);aux_padded.push_back(std::max(size_t(k),v.size()));total+=aux_padded.back();author_total+=v.size();}
++ // Only tiny controls need this floor to bind the initial distributed Merkle root at PC_offset=10.
++ aux_side=std::max(size_t(1024),power2(total));std::vector<F> raw(2*aux_side,F(0));for(int j=0;j<3;j++){require(b1[j].size()==b2[j].size(),"aux beta dimensions");std::copy(b1[j].begin(),b1[j].end(),raw.begin()+aux_offsets[j]);std::copy(b2[j].begin(),b2[j].end(),raw.begin()+aux_side+aux_offsets[j]);}
++ int rank;MPI_Comm_rank(MPI_COMM_WORLD,&rank);if(rank==0)printf("{\"event\":\"compact_aux_layout\",\"actual_local_coefficients\":%zu,\"author_pow2\":%zu,\"encoded_local_coefficients\":%zu}\n",2*author_total,2*power2(author_total),2*aux_side);
++ commit(raw,row,cw,Com,k,N,2);
++}
++void capture_index_endpoints(const std::vector<F>&e,const std::vector<std::vector<F>>&p,const std::vector<F>&q,const std::vector<F>&qr,int N){
++ require(e.size()==24&&p.size()==24,"GKR endpoint dimensions");gkr_q=q;gkr_rank=qr;
++ auto ri=challenges(e,5,7301,N);precompute_beta(ri,index_batch);index_value=F(0);
++ for(int m=0;m<3;m++){int idx[6]={18+m,21+m,3*m+2,3*m+11,3*m+1,3*m+10};for(int j=0;j<6;j++)index_value+=index_batch[6*m+j]*pad(e[idx[j]],p[idx[j]].size(),index_lengths[6*m+j],q);}
++ auto ra=challenges(e,3,7302,N);precompute_beta(ra,aux_batch);aux_value=F(0);for(int m=0;m<3;m++)aux_value+=aux_batch[m]*pad(e[3*m],aux_lengths[m],aux_padded[m],q)+aux_batch[m+3]*pad(e[3*m+9],aux_lengths[m],aux_padded[m],q);
++}
++void check_product_endpoint(const std::vector<F>&e,const std::vector<int>&order,const std::vector<size_t>&lengths,const std::vector<F>&q,F claimed){
++ size_t offset=0;F expected(0);for(size_t s=0;s<order.size();s++){size_t j=order[s],len=lengths[j];F w(1);for(size_t b=lg(len);b<q.size();b++)w*=((offset>>b)&1)?q[b]:F(1)-q[b];expected+=w*e[j];offset+=len;}
++ require(expected==claimed,"GKR static/aux endpoint mismatch");
++}
++void actual_cubic_vectors(const std::vector<std::vector<F>>&b1,const std::vector<std::vector<F>>&b2,const std::vector<F>&mix,std::vector<F>&v1,std::vector<F>&v2,std::vector<F>&v3,int N){
++ int rank;MPI_Comm_rank(MPI_COMM_WORLD,&rank);v1.assign(aux_side,F(0));v2=v1;v3=v1;
++ for(int m=0;m<3;m++){size_t len=b1[m].size();std::copy(b1[m].begin(),b1[m].end(),v1.begin()+aux_offsets[m]);std::copy(b2[m].begin(),b2[m].end(),v2.begin()+aux_offsets[m]);for(size_t j=0;j<len;j++)if(rank*len+j<size_t(real_idx_dim[m]))v3[aux_offsets[m]+j]=mix[m];}
++}
++void check_public_cubic(F claimed,const std::vector<F>&q,const std::vector<F>&mix,int N){
++ size_t d=lg(aux_side);require(q.size()==d+lg(N),"public cubic dimension");std::vector<F> qi(q.begin(),q.begin()+d),qr(q.begin()+d,q.end()),br;precompute_beta(qr,br);F expected(0);
++ for(int m=0;m<3;m++){size_t len=aux_lengths[m],n=real_idx_dim[m],full=n/len,rem=n%len,start=aux_offsets[m];F active=prefix(full,qr)*(prefix(start+len,qi)-prefix(start,qi));if(rem)active+=br[full]*(prefix(start+rem,qi)-prefix(start,qi));expected+=mix[m]*active;}
++ require(expected==claimed,"unbound public sparse weight");
++}
++void sync_native_fs(int N){challenges({},0,7303,N);}
++F endpoint_mix_challenge(const std::vector<F>&e,int N){return challenges(e,1,7304,N)[0];}
++void open_aux_gkr(std::vector<F>&cw,std::vector<F>&row,MT&Com,int N,double&ps){std::vector<F> c=cw,r=row,v1,v2;auto lengths=aux_padded,offsets=aux_offsets;for(int m=0;m<3;m++){lengths.push_back(aux_padded[m]);offsets.push_back(aux_side+aux_offsets[m]);}segmented_weights(lengths,offsets,2*aux_side,aux_batch,N/2,N,v1,v2);F value=aux_value;if(getenv("PAPPAS_NEGATIVE_AUX_CLAIM"))value+=F(1);open_plaintext(c,r,v1,v2,Com,value,796,N/2,N,ps,false,true);sync_native_fs(N);}
++void actual_index_weights(std::vector<F>&v1,std::vector<F>&v2,F&value,int N){require(!gkr_q.empty(),"index not linked to GKR");segmented_weights(index_lengths,index_offsets,index_size,index_batch,N,N,v1,v2);value=index_value;}
++void actual_index_open(std::vector<F>&row,std::vector<F>&cw,MT&Com,int N,double&ps){std::vector<F>v1,v2;F value;actual_index_weights(v1,v2,value,N);if(getenv("PAPPAS_NEGATIVE_INDEX_CLAIM"))value+=F(1);open_plaintext(cw,row,v1,v2,Com,value,100,N,N,ps,false,true);sync_native_fs(N);}
+--- /dev/null
++++ b/src/index_binding.hpp
+@@ -0,0 +1,15 @@
++#pragma once
++#include "config_pc.hpp"
++#include "sparse_eval.hpp"
++struct MT;
++void actual_index_commit(std::vector<sparse_eval_data>&,std::vector<F>&,std::vector<F>&,MT&,int,int);
++void actual_aux_commit(std::vector<std::vector<F>>&,std::vector<std::vector<F>>&,std::vector<F>&,std::vector<F>&,MT&,int,int);
++void capture_index_endpoints(const std::vector<F>&,const std::vector<std::vector<F>>&,const std::vector<F>&,const std::vector<F>&,int);
++void check_product_endpoint(const std::vector<F>&,const std::vector<int>&,const std::vector<size_t>&,const std::vector<F>&,F);
++void actual_cubic_vectors(const std::vector<std::vector<F>>&,const std::vector<std::vector<F>>&,const std::vector<F>&,std::vector<F>&,std::vector<F>&,std::vector<F>&,int);
++void check_public_cubic(F,const std::vector<F>&,const std::vector<F>&,int);
++void open_aux_gkr(std::vector<F>&,std::vector<F>&,MT&,int,double&);
++void actual_index_weights(std::vector<F>&,std::vector<F>&,F&,int);
++void actual_index_open(std::vector<F>&,std::vector<F>&,MT&,int,double&);
++void sync_native_fs(int);
++F endpoint_mix_challenge(const std::vector<F>&,int);
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1,1082 +1,21 @@
+-#include "config_pc.hpp"
+-#include "constants.h"
+-#include <vector>
+-#include <math.h>
+-#include "utils.hpp"
+-#include "mimc.h"
+-#include <chrono>
+-#include <fcntl.h>
+-#include <omp.h>
+-#include <unistd.h>
+-#include <mutex>
+-#include "polynomial.h"
++#include "nand_input.hpp"
+ #include "coPIOP.h"
+-#include "coSumcheck_MPI.h"
+-#include "coPCS_utils.h"
++#include "timer.hpp"
+ #include <mpi.h>
+-#include "coPCS.h"
+-#include "Fiat_Shamir.h"
+-#include "Distributed_Sumcheck.h"
+-#include "MPI_utils.hpp"
+-#include "timer.hpp"
+-#include <algorithm>
+-
+-
+-int tensor_row_size;
+-int mul_counter= 0;
+-extern timer pt,pt_cp,vt,sch_com;
+-extern timer_cpu pt_cpu;
+-extern vector<vector<pair<int, int>>> A,B,C;
+-extern vector<vector<pair<int, int>>> pA,pB,pC;
+-extern vector<vector<pair<int,int>>> tA,tB,tC;
+-extern int logm,logn;
+-extern int rate;
++#include <sys/random.h>
++#include <stdexcept>
++unsigned long int mul_counter=0;
++int tensor_row_size=0,cosumcheck_offset=0,sumcheck_offset=4,PC_offset=10,multree_offset=4;
++bool isLAN=false;
+ extern bool data_parallel;
+-extern int cosumcheck_offset = 0;
+-extern int sumcheck_offset = 4;
+-extern int PC_offset = 10;
+-extern int multree_offset = 4;
+-extern int com_rounds;
+-bool isLAN = false;
+-extern double cm;
+-
+-
+-void encode_locally(vector<vector<F>> &C, vector<vector<F>> &R_shares, int l, int N, int M, int k, int _k){
+-    vector<vector<F>> data(M/k);
+-    C.resize(N);
+-    int ctr = 0;
+-    for(int i = 0; i < data.size(); i++){
+-        data[i].resize(_k);
+-        for(int j = 0; j < _k; j++){
+-            data[i][j] = ctr++;
+-        }
+-        fft(data[i],(int)log2(_k),true);
+-        data[i].resize(N,0);
+-        fft(data[i],(int)log2(N),false);
+-    }
+-    for(int i = 0; i < C.size(); i++){
+-        C[i].resize(next_pow2(M/k+l),F(0));
+-        for(int j = 0; j < M/k; j++){
+-            C[i][j] = data[j][i];
+-        }
+-        for(int j = 0; j < l; j++){
+-            C[i][j+(M/k)] = R_shares[i][j];
+-        }
+-        fft(C[i], (int)log2(C[i].size()),true);
+-        C[i].resize(C[i].size()*4,F(0));
+-        fft(C[i], (int)log2(C[i].size()),false);
+-        
+-    }
+-}   
+-
+-F evaluate_locally(vector<F> r, int k, int _k){
+-    vector<F> b;precompute_beta(r,b);
+-    F y = F(0);
+-    int ctr = 0;
+-    int idx = 0;
+-    for(int i = 0; i < b.size()/k; i++){
+-        for(int j = 0; j < k; j++){
+-            y += b[idx]*F(ctr);
+-            ctr++;
+-            idx++;
+-        }
+-        ctr += (_k-k);    
+-    }
+-    return y;
++int main(int argc,char**argv){
++ setvbuf(stdout,nullptr,_IONBF,0);MPI_Init(&argc,&argv);int N,rank;MPI_Comm_size(MPI_COMM_WORLD,&N);MPI_Comm_rank(MPI_COMM_WORLD,&rank);
++ try{F::init();if(argc!=3)throw std::runtime_error("check|prove input-directory");if(N<8||(N&(N-1)))throw std::runtime_error("NAND party count");nand_load(argv[2]);
++  if(std::string(argv[1])=="check")nand_check(N);
++  else if(std::string(argv[1])=="prove"){
++   unsigned seed;if(getrandom(&seed,sizeof(seed),0)!=sizeof(seed))throw std::runtime_error("fresh native randomness");srand(seed);data_parallel=false;
++   coPIOP_prove(nand_size(),N,N/2,N/4,2);
++   if(rank==0)printf("{\"event\":\"native_general_prover_returned\",\"embedded_checks\":true,\"independent_full_verifier\":false}\n");
++  }else throw std::runtime_error("unknown NAND command");MPI_Finalize();return 0;
++ }catch(const std::exception&e){fprintf(stderr,"NAND_REJECT: %s\n",e.what());MPI_Abort(MPI_COMM_WORLD,2);return 2;}
+ }
+-
+-
+-void test_batch_check(int M,int N, int k, int _k, int l){
+-    int rank;
+-    MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+-    vector<vector<F>> V1(N),V2(N),V3(N),V4(N); 
+-    vector<vector<F>> R1(N),R2(N); 
+-    vector<F> r;
+-    for(int i = 0; i < (int)log2(M); i++){
+-        r.push_back(hash_to_field({0}));
+-    }   
+-    vector<F> fl,fr,fo;
+-    F y = F(0);
+-    if(rank == 0){
+-       //vector<F> beta; precompute_beta(r,beta);
+-        int idx = 0;
+-        for(int i = 0; i < N; i++){
+-            V1[i].resize(M/k);V2[i].resize(M/k);V3[i].resize(M/k);V4[i].resize(M/k);
+-            R1[i].resize((int)log2(M/k) + 2 );
+-            R2[i].resize((int)log2(M/k) + 2 );
+-        }
+-        int ctr = 0;
+-        
+-        for(int i = 0; i < M/k; i++){
+-            vector<F> buff1(_k),buff2(_k),buff3(_k),buff4(_k);
+-            for(int j = 0; j < k; j++){
+-                buff1[j] = ctr++;
+-                buff2[j] = ctr++;
+-                buff3[j] = ctr++;                
+-                buff4[j] = ctr++;                
+-                y += buff1[j]*buff2[j] + buff3[j]*buff4[j];
+-                fl.push_back(buff1[j]);
+-                fr.push_back(buff2[j]);
+-                fo.push_back(buff3[j]);
+-            }
+-            for(int j = k; j < _k; j++){
+-                buff1[j] = ctr++;
+-                buff2[j] = ctr++;
+-                buff3[j] = ctr++;                
+-                buff4[j] = ctr++;                
+-            }
+-            fft(buff1,(int)log2(buff1.size()),true);fft(buff2,(int)log2(buff2.size()),true);fft(buff3,(int)log2(buff3.size()),true);fft(buff4,(int)log2(buff4.size()),true);
+-            buff1.resize(2*N,0);buff2.resize(2*N,0);buff3.resize(2*N,0);buff4.resize(2*N,0);
+-            fft(buff1,(int)log2(buff1.size()),false);fft(buff2,(int)log2(buff2.size()),false);fft(buff3,(int)log2(buff3.size()),false);
+-            fft(buff4,(int)log2(buff4.size()),false);
+-            for(int j = 0; j < N; j++){
+-                V1[j][i] = buff1[2*j+1];
+-                V2[j][i] = buff2[2*j+1];
+-                V3[j][i] = buff3[2*j+1];
+-                V4[j][i] = buff4[2*j+1];
+-            }
+-        }
+-        
+-        for(int i = 0; i < R1[0].size(); i++){
+-            vector<F> buff1(_k),buff2(_k);
+-            for(int j = 0; j < k; j++){
+-                buff1[j] = ctr++;
+-                buff2[j] = ctr++;
+-            }
+-            for(int j = k; j < _k; j++){
+-                buff1[j] = ctr++;
+-                buff2[j] = ctr++;
+-            }
+-            fft(buff1,(int)log2(buff1.size()),true);fft(buff2,(int)log2(buff2.size()),true);
+-            buff1.resize(2*N,0);buff2.resize(2*N,0);
+-            fft(buff1,(int)log2(buff1.size()),false);fft(buff2,(int)log2(buff2.size()),false);
+-            for(int j = 0; j < N; j++){
+-                R1[j][i] = buff1[2*j+1];
+-                R2[j][i] = buff2[2*j+1];
+-            }
+-        }
+-        
+-    }
+-    vector<F> v1,v2,v3,v4,h1,h2;
+-    vector<F> buff;
+-    vector<u64> buff_u64;
+-    
+-    if(rank == 0){
+-        v1 = V1[0];v2 = V2[0]; v3 = V3[0]; v4 = V4[0];
+-        h1 = R1[0]; h2 = R2[0];
+-        for(int i = 1; i < N; i++){
+-            buff = V1[i];
+-            buff.insert(buff.end(),V2[i].begin(),V2[i].end());
+-            buff.insert(buff.end(),V3[i].begin(),V3[i].end());
+-            buff.insert(buff.end(),V4[i].begin(),V4[i].end());
+-            buff.insert(buff.end(),R1[i].begin(),R1[i].end());
+-            buff.insert(buff.end(),R2[i].begin(),R2[i].end());
+-            buff.push_back(y);
+-            field_vector_serialize(buff,buff_u64);
+-            MPI_Send(buff_u64.data(),buff_u64.size(),MPI_UINT64_T,i,0,MPI_COMM_WORLD);
+-        }
+-    }else{
+-        buff_u64.resize(2+2*(4*M/k + 2*(log2(M/k) + 2)));
+-        MPI_Recv(buff_u64.data(),buff_u64.size(),MPI_UINT64_T,0,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+-        field_vector_deserialize(buff_u64,buff);
+-        v1.resize(M/k);v2.resize(M/k);v3.resize(M/k);v4.resize(M/k);
+-        h1.resize(log2(M/k) + 2);h2.resize(log2(M/k) + 2);
+-        int ctr = 0;
+-        for(int i = 0; i < M/k; i++){
+-            v1[i] = buff[ctr++];
+-        }
+-        for(int i = 0; i < M/k; i++){
+-            v2[i] = buff[ctr++];
+-        }
+-        for(int i = 0; i < M/k; i++){
+-            v3[i] = buff[ctr++];
+-        }
+-        for(int i = 0; i < M/k; i++){
+-            v4[i] = buff[ctr++];
+-        }
+-        for(int i = 0; i < h1.size(); i++){
+-            h1[i] = buff[ctr++];
+-        }
+-        for(int i = 0; i < h1.size(); i++){
+-            h2[i] = buff[ctr++];
+-        }
+-        y = buff[ctr];
+-    }
+-    MPI_Barrier(MPI_COMM_WORLD);
+-
+-    double pt = 0.0,vt = 0,ps = 0,cm = 0;
+-    vector<pair<F,vector<F>>> reply = _quadratic_batch_sumcheck(y, v1, v2, v3,v4, h1, h2, N, _k, k,ps);
+-    if(rank == (0)){
+-        if(evaluate_vector(fl,reply[0].second) != reply[0].first){
+-            printf("ERROR L\n");
+-        }
+-        if(evaluate_vector(fr,reply[1].second) != reply[1].first){
+-            printf("ERROR R\n");
+-        }
+-        if(evaluate_vector(fo,reply[2].second) != reply[2].first){
+-            printf("ERROR O\n");
+-        }
+-        printf("OK\n");
+-    }
+-
+-}
+-
+-void test_zero_check(int M,int N, int k, int _k, int l){
+-    int rank;
+-    MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+-    vector<vector<F>> L(N),R(N),O(N); 
+-    vector<vector<F>> R1(N),R2(N); 
+-    vector<F> r;
+-    for(int i = 0; i < (int)log2(M); i++){
+-        r.push_back(hash_to_field({0}));
+-    }   
+-    vector<F> fl,fr,fo;
+-        
+-    if(rank == 0){
+-       //vector<F> beta; precompute_beta(r,beta);
+-        int idx = 0;
+-        for(int i = 0; i < N; i++){
+-            L[i].resize(M/k);R[i].resize(M/k);O[i].resize(M/k);
+-            R1[i].resize((int)log2(M/k) + 2 + l);
+-            R2[i].resize((int)log2(M/k) + 2 + l);
+-        }
+-        int ctr = 0;
+-
+-        for(int i = 0; i < M/k; i++){
+-            vector<F> buffL(_k),buffR(_k),buffO(_k);
+-            for(int j = 0; j < k; j++){
+-                buffL[j] = ctr++;
+-                buffR[j] = ctr++;
+-                buffO[j] = buffL[j]*buffR[j];                
+-                fl.push_back(buffL[j]);
+-                fr.push_back(buffR[j]);
+-                fo.push_back(buffO[j]);
+-            }
+-            for(int j = k; j < _k; j++){
+-                buffL[j] = ctr++;
+-                buffR[j] = ctr++;
+-                buffO[j] = ctr++;                
+-            }
+-            fft(buffL,(int)log2(buffL.size()),true);fft(buffR,(int)log2(buffL.size()),true);fft(buffO,(int)log2(buffL.size()),true);
+-            buffL.resize(2*N,0);buffR.resize(2*N,0);buffO.resize(2*N,0);
+-            fft(buffL,(int)log2(buffL.size()),false);fft(buffR,(int)log2(buffL.size()),false);fft(buffO,(int)log2(buffL.size()),false);
+-            for(int j = 0; j < N; j++){
+-                L[j][i] = buffL[2*j+1];
+-                R[j][i] = buffR[2*j+1];
+-                O[j][i] = buffO[2*j+1];
+-            }
+-        }
+-        
+-        for(int i = 0; i < R1[0].size(); i++){
+-            vector<F> buff1(_k),buff2(_k);
+-            for(int j = 0; j < k; j++){
+-                buff1[j] = ctr++;
+-                buff2[j] = ctr++;
+-            }
+-            for(int j = k; j < _k; j++){
+-                buff1[j] = ctr++;
+-                buff2[j] = ctr++;
+-            }
+-            fft(buff1,(int)log2(buff1.size()),true);fft(buff2,(int)log2(buff2.size()),true);
+-            buff1.resize(2*N,0);buff2.resize(2*N,0);
+-            fft(buff1,(int)log2(buff1.size()),false);fft(buff2,(int)log2(buff2.size()),false);
+-            for(int j = 0; j < N; j++){
+-                R1[j][i] = buff1[2*j+1];
+-                R2[j][i] = buff2[2*j+1];
+-            }
+-        }
+-        
+-    }
+-    vector<F> v1,v2,v3,h1,h2;
+-    vector<F> buff;
+-    vector<u64> buff_u64;
+-    
+-    if(rank == 0){
+-        v1 = L[0];v2 = R[0]; v3 = O[0];
+-        h1 = R1[0]; h2 = R2[0];
+-        for(int i = 1; i < N; i++){
+-            buff = L[i];
+-            buff.insert(buff.end(),R[i].begin(),R[i].end());
+-            buff.insert(buff.end(),O[i].begin(),O[i].end());
+-            buff.insert(buff.end(),R1[i].begin(),R1[i].end());
+-            buff.insert(buff.end(),R2[i].begin(),R2[i].end());
+-            field_vector_serialize(buff,buff_u64);
+-            MPI_Send(buff_u64.data(),buff_u64.size(),MPI_UINT64_T,i,0,MPI_COMM_WORLD);
+-        }
+-    }else{
+-        buff_u64.resize(2*(3*M/k + 2*(log2(M/k) + 2+l)));
+-        MPI_Recv(buff_u64.data(),buff_u64.size(),MPI_UINT64_T,0,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+-        field_vector_deserialize(buff_u64,buff);
+-        v1.resize(M/k);v2.resize(M/k);v3.resize(M/k);
+-        h1.resize(log2(M/k) + 2+l);h2.resize(log2(M/k) + 2+l);
+-        int ctr = 0;
+-        for(int i = 0; i < M/k; i++){
+-            v1[i] = buff[ctr++];
+-        }
+-        for(int i = 0; i < M/k; i++){
+-            v2[i] = buff[ctr++];
+-        }
+-        for(int i = 0; i < M/k; i++){
+-            v3[i] = buff[ctr++];
+-        }
+-        for(int i = 0; i < h1.size(); i++){
+-            h1[i] = buff[ctr++];
+-        }
+-        for(int i = 0; i < h1.size(); i++){
+-            h2[i] = buff[ctr++];
+-        }
+-    }
+-    MPI_Barrier(MPI_COMM_WORLD);
+-
+-    double pt = 0.0,vt = 0,ps = 0,cm = 0;
+-    vector<pair<F,vector<F>>> reply = _zero_check_sumcheck(F(0), v1, v2, v3, h1, h2, r, N, _k, k,ps);
+-    if(rank == (0)){
+-        if(evaluate_vector(fl,reply[0].second) != reply[0].first){
+-            printf("ERROR L\n");
+-        }
+-        if(evaluate_vector(fr,reply[1].second) != reply[1].first){
+-            printf("ERROR R\n");
+-        }
+-        if(evaluate_vector(fo,reply[2].second) != reply[2].first){
+-            printf("ERROR O\n");
+-        }
+-        printf("OK\n");
+-    }
+-
+-}
+-
+-void distribute_data(vector<vector<F>> &Data){
+-    vector<u64> buff;
+-    for(int i = 1; i < Data.size(); i++){
+-        field_vector_serialize(Data[i],buff);
+-        MPI_Send(buff.data(),buff.size(),MPI_UINT64_T,i,0,MPI_COMM_WORLD);
+-    }
+-}
+-
+-void distribute_data_tensor(vector<vector<vector<F>>> &Data){
+-    vector<u64> buff;
+-    vector<F> arr;
+-    for(int i = 1; i < Data.size(); i++){
+-        arr = convert2vector(Data[i]);
+-        field_vector_serialize(arr,buff);
+-        MPI_Send(buff.data(),buff.size(),MPI_UINT64_T,i,0,MPI_COMM_WORLD);
+-    }
+-}
+-
+-void get_data(vector<F> &v, int N){
+-    vector<u64> buff(N*2);
+-    MPI_Recv(buff.data(),buff.size(),MPI_UINT64_T,0,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+-    field_vector_deserialize(buff,v);
+-}
+-
+-void test_quadratic_sumheck(int N, int M){
+-    int rank;
+-    MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+-    F sum = 0;
+-    vector<F> arr1,arr2;
+-    vector<F> f1,f2;
+-    if(rank == 0){
+-        vector<vector<F>> V(N);
+-        vector<vector<F>> v1(N),v2(N);
+-        for(int i = 0; i < N; i++){
+-            v1[i].resize(M/N);
+-            v2[i].resize(M/N);
+-            for(int j = 0; j < v1[i].size(); j++){
+-                v1[i][j] = random();
+-                v2[i][j] = random();
+-                f1.push_back(v1[i][j]);
+-                f2.push_back(v2[i][j]);
+-                
+-                sum += v1[i][j]*v2[i][j];
+-            }
+-            V[i] = v1[i];
+-            V[i].insert(V[i].end(),v2[i].begin(),v2[i].end());
+-        }
+-        for(int i = 0; i < N; i++){
+-            V[i].push_back(sum);
+-        }
+-        arr1 = v1[0];
+-        arr2 = v2[0];
+-        distribute_data(V);
+-    }else{
+-        vector<F> buff;
+-        get_data(buff,2*M/N+1);
+-        arr1.resize(M/N);
+-        arr2.resize(M/N);
+-        for(int i = 0; i < M/N; i++){
+-            arr1[i] = buff[i];
+-            arr2[i] = buff[i+M/N];
+-        }
+-        sum = buff[buff.size()-1];
+-    }
+-    double vt = 0.0,ps = 0.0;
+-    vector<pair<F,vector<F>>> claims = _quadratic_sumcheck_sparrow(sum, arr1, arr2, N);
+-    //vector<pair<F,vector<F>>> claims = _quadratic_sumcheck(sum, arr1, arr2, N);
+-    if(rank == 0){
+-        if(evaluate_vector(f1,claims[0].second) != claims[0].first){
+-            printf("ERROR1\n");
+-        }
+-        if(evaluate_vector(f1,claims[0].second) != claims[0].first){
+-            printf("ERROR1\n");
+-        }
+-    }
+-    
+-}
+-
+-void test_cubic_sumheck(int N, int M){
+-    int rank;
+-    MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+-    
+-    vector<F> r1,r2,r3;
+-    for(int i = 0; i < (int)log2(M/N)-sumcheck_offset; i++) r1.push_back(hash_to_field({}));
+-    for(int i = (int)log2(M/N)-sumcheck_offset; i < (int)log2(M/N); i++) r2.push_back(hash_to_field({}));
+-    for(int i = (int)log2(M/N); i < (int)log2(M); i++) r3.push_back(hash_to_field({}));
+-    vector<F> beta1,beta2,beta3;
+-    precompute_beta(r1,beta1);precompute_beta(r2,beta2);precompute_beta(r3,beta3);
+-    vector<F> f1,f2;
+-        
+-    F sum = 0;
+-    vector<F> arr1,arr2,arr3;
+-    if(rank == 0){
+-        vector<vector<F>> V(N);
+-        vector<vector<F>> v1(N),v2(N);
+-        vector<F> r = r1;r.insert(r.end(),r2.begin(),r2.end());r.insert(r.end(),r3.begin(),r3.end());
+-        vector<F> beta;precompute_beta(r,beta);
+-        int ctr = 0;
+-        for(int i = 0; i < N; i++){
+-            v1[i].resize(M/N);
+-            v2[i].resize(M/N);
+-            for(int j = 0; j < v1[i].size(); j++){
+-                v1[i][j] = rand();
+-                v2[i][j] = rand();
+-                f1.push_back(v1[i][j]);
+-                f2.push_back(v2[i][j]);
+-                sum += v1[i][j]*v2[i][j]*beta[ctr++];
+-            }
+-            V[i] = v1[i];
+-            V[i].insert(V[i].end(),v2[i].begin(),v2[i].end());
+-        }
+-        for(int i = 0; i < N; i++){
+-            V[i].push_back(sum);
+-        }
+-        arr1 = v1[0];
+-        arr2 = v2[0];
+-        distribute_data(V);
+-    }else{
+-        vector<F> buff;
+-        get_data(buff,2*M/N+1);
+-        arr1.resize(M/N);
+-        arr2.resize(M/N);
+-        for(int i = 0; i < M/N; i++){
+-            arr1[i] = buff[i];
+-            arr2[i] = buff[i+M/N];
+-        }
+-        sum = buff[buff.size()-1];
+-    }
+-    double vt = 0.0,ps = 0.0;
+-
+-     pt.start();
+-       
+-    vector<pair<F,vector<F>>> claims = _cubic_sumcheck_sparrow(sum, arr1, arr2, beta1,beta2,beta3, N);
+-     pt.end();
+-    /*
+-    if(rank == 0){
+-        if(evaluate_vector(f1,claims[0].second) != claims[0].first){
+-            printf("ERROR1\n");
+-        }
+-        if(evaluate_vector(f2,claims[0].second) != claims[1].first){
+-            printf("ERROR1\n");
+-        }
+-    }*/
+-    
+-}
+-
+-void test_product(int N, int M, int K){
+-    int rank;
+-    MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+-    vector<vector<F>> input(K);
+-    vector<F> prod(K,F(1));
+-    vector<vector<vector<F>>> data(N);
+-    vector<vector<F>> poly_matrix(K);
+-    if(rank == 0){
+-        int ctr = 1;
+-        for(int i = 0; i < N; i++){
+-            data[i].resize(K);
+-            for(int j = 0; j < K; j++){
+-                data[i][j].resize(M/N);
+-                for(int k = 0; k < M/N; k++){
+-                    data[i][j][k] = ctr++;
+-                    prod[j] *= data[i][j][k];
+-                    poly_matrix[j].push_back(data[i][j][k]);
+-                } 
+-            }
+-        }
+-        input = data[0];
+-        distribute_data_tensor(data);
+-    }else{
+-        vector<F> buff;
+-        int ctr = 0;
+-        get_data(buff,K*M/N);
+-        for(int i = 0; i < input.size(); i++){
+-            input[i].resize(M/N);
+-            for(int j = 0; j < M/N; j++){
+-                input[i][j] = buff[ctr++];
+-            }
+-        }
+-    }
+-
+-    vector<F> output,r;
+-    double vt,ps;
+-    
+-    pair<F,vector<vector<F>>> claim =  prove_product(input, output, F(0), r, N);
+-    
+-    vector<F> b1,b2;
+-    precompute_beta(claim.second[0],b1);
+-    precompute_beta(claim.second[2],b2);
+-    vector<F> Y = batch_distributed_eval(input,b1,b2,N);
+-    
+-    if(rank == 0){
+-        F sum  =F(0);
+-        for(int i = 0; i < data.size(); i++){
+-            F y = F(0);
+-            for(int j = 0; j < data[i][0].size(); j++){
+-                if(i == 0 && data[i][0][j] != input[i][j]){
+-                    printf("Error\n");
+-                }
+-                y += data[i][0][j]*b1[j];
+-            }
+-            printf("> %lld,%lld\n",y.real,y.img);
+-            sum += b2[i]*y;
+-        }
+-
+-        printf("%d\n",output.size());
+-        for(int i = 0; i < output.size(); i++){
+-            if(output[i] != prod[i]){
+-                printf("Error %d\n",i);
+-            }
+-        }
+-        for(int i = 0; i < input.size(); i++){
+-            for(int j = 0; j < input[i].size(); j++){
+-                if(input[i][j] != poly_matrix[i][j]){
+-                    printf("Error\n");
+-                }
+-            }
+-        }
+-        vector<F> r = claim.second[0];
+-        r.insert(r.end(),claim.second[2].begin(),claim.second[2].end());
+-        r.insert(r.end(),claim.second[1].begin(),claim.second[1].end());
+-        vector<F> poly = convert2vector(poly_matrix);
+-        if(evaluate_vector(poly,r) != claim.first){
+-            printf(">>>EEROR\n");
+-        }
+-        if(sum != claim.first){
+-            printf("EEER\n");
+-        }
+-        if(evaluate_vector(Y,claim.second[1])!= sum){
+-            printf("EERROR 2\n");
+-        }
+-    }
+-}
+-
+-
+-
+-
+-
+-void test_sparse_eval(int N, int M, int type){
+-    int rank;
+-    MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+-    vector<sparse_eval_data> index;
+-        
+-    distribute_index(N, M, index,type);
+-    vector<F> r1,r2;
+-    vector<vector<F>> beta1(3),beta2(3);
+-    F a = hash_to_field({0}), b = hash_to_field({0}), c = hash_to_field({0});
+-    //double pt = 0.0;
+-
+-    for(int i = 0; i < logm; i++){
+-        r1.push_back(hash_to_field({0}));
+-    }
+-    for(int i = 0; i < logn; i++){
+-        r2.push_back(hash_to_field({0}));
+-    }
+-    compute_R1CS_betas(r1,  r2, index, beta1, beta2, logm, logn, N);
+-    vector<F> RA,RB,RC;
+-    _reduce_R1CS_matrixes(M, r1, RA, RB, RC, N);
+-    
+-    
+-    vector<vector<F>> polys = {RA,RB,RC};
+-    vector<F> r21,r22;
+-    for(int i = 0; i < logn - (int)log2(N); i++) r21.push_back(r2[i]);
+-    for(int i = r21.size(); i < r2.size(); i++) r22.push_back(r2[i]);
+-    vector<F> b1,b2;
+-    precompute_beta(r21,b1);precompute_beta(r22,b2);
+-    
+-
+-    vector<F> Y = batch_distributed_eval(polys,b1,b2,N);
+-    vector<F> _RA,_RB,_RC;
+-    if(rank!= 0){
+-        generate_R1CS_matrixes(M,type);
+-    }
+-    
+-    reduce_R1CS_matrixes(M,r1,_RA,_RB,_RC);
+-    
+-    //if(rank == 4){
+-       /*
+-        for(int i = 0; i < pA.size(); i++){
+-            if(pA[i].size()){
+-                for(int j = 0; j < pA[i].size(); j++){
+-                    printf(" %d, %d |",pA[i][j].first,pA[i][j].second);
+-                }
+-                printf("\n");
+-            }
+-        }
+-        printf("=====================\n");
+-        for(int i = 0; i < pA.size(); i++){
+-            if(tA[i+pC.size()*rank].size()){
+-                for(int j = 0; j < tA[i+pC.size()*rank].size(); j++){
+-                    printf(" %d, %d |",tA[i+pC.size()*rank][j].first,tA[i+pC.size()*rank][j].second);
+-                }
+-                printf("\n");
+-            }
+-        }
+-        printf("===== %d,%d ======\n",pA.size()*N,tA.size());
+-       */
+-        for(int i = 0; i < pA.size(); i++){
+-            if(pA[i].size() != tA[i+pA.size()*rank].size()){
+-                printf("> Error pA %d\n",i);
+-                return;
+-            }
+-            if(pA[i].size()){
+-                for(int j = 0; j < pA[i].size(); j++){
+-                    if(pA[i][j].first != tA[i+pA.size()*rank][j].first || pA[i][j].second != tA[i+pA.size()*rank][j].second){
+-                        printf("> Error pA %d,%d\n",i,j);        
+-                    }
+-                }
+-            }
+-        }
+-        for(int i = 0; i < pB.size(); i++){
+-            if(pB[i].size() != tB[i+pB.size()*rank].size()){
+-                printf("> Error pB %d\n",i);
+-                return;
+-            }
+-            if(pB[i].size()){
+-                for(int j = 0; j < pB[i].size(); j++){
+-                    if(pB[i][j].first != tB[i+pB.size()*rank][j].first || pB[i][j].second != tB[i+pB.size()*rank][j].second){
+-                        printf("> Error pB %d,%d\n",i,j);        
+-                    }
+-                }
+-            }
+-        }
+-
+-        for(int i = 0; i < pC.size(); i++){
+-            if(pC[i].size() != tC[i+pC.size()*rank].size()){
+-                printf("> Error pC %d\n",i);
+-                return;
+-            }
+-            if(pC[i].size()){
+-                for(int j = 0; j < pC[i].size(); j++){
+-                    if(pC[i][j].first != tC[i+pC.size()*rank][j].first || pC[i][j].second != tC[i+pC.size()*rank][j].second){
+-                        printf("> Error pC %d,%d\n",i,j);        
+-                    }
+-                }
+-            }
+-        }
+-        
+-        
+-        
+-   // }
+-    
+-        for(int i = 0; i < RA.size(); i++){
+-            if(RA[i] != _RA[i + rank*pA.size()]){
+-               printf("Error %d,%d,%d, (%lld,%lld),(%lld,%lld)\n",rank,i,RA.size(),RA[i].real,RA[i].img,_RA[i + rank*pA.size()].real,_RA[i + rank*pA.size()].img);
+-            }
+-        }
+-        
+-        for(int i = 0; i < RB.size(); i++){
+-            if(RB[i] != _RB[i + rank*pB.size()]){
+-               printf("Error %d,%d,%d, (%lld,%lld),(%lld,%lld)\n",rank,i,RB.size(),RA[i].real,RA[i].img,_RA[i + rank*pB.size()].real,_RA[i + rank*pB.size()].img);
+-            }
+-        }
+-        
+-        for(int i = 0; i < RC.size(); i++){
+-            if(RC[i] != _RC[i + rank*pC.size()]){
+-               printf("Error %d,%d,%d, (%lld,%lld),(%lld,%lld)\n",rank,i,RC.size(),RA[i].real,RA[i].img,_RA[i + rank*pB.size()].real,_RA[i + rank*pB.size()].img);
+-            }
+-        }
+-        if(evaluate_vector(_RA,r2) != Y[0]){
+-            printf("Error 1\n");
+-        }
+-        if(evaluate_vector(_RB,r2) != Y[1]){
+-            printf("Error 2\n");
+-        }
+-        if(evaluate_vector(_RC,r2) != Y[2]){
+-            printf("Error 3\n");
+-        }
+-      
+-    MPI_Barrier(MPI_COMM_WORLD);
+-    pt.start();
+-    //_prove_sparse_eval(a*Y[0]+b*Y[1]+c*Y[2], a, b, c, beta1, beta2, index,r1,r2, N);
+-    _prove_sparse_eval_opt(a*Y[0]+b*Y[1]+c*Y[2], a, b, c, beta1, beta2, index, r1, r2, N);
+-    pt.end();
+-    printf("%lf\n",pt.get_time());
+-}
+-
+-void test_mult_tree(vector<int> dims, int N){
+-    int rank,size = 0;
+-    MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+-    vector<F> output;
+-    for(int i = 0; i < dims.size(); i++) size += dims[i];
+-    vector<vector<F>> input;
+-    vector<F> prod(dims.size(),F(1));
+-    if(rank == 0){
+-        vector<vector<vector<F>>> data(N);
+-        for(int i = 0; i < N; i++){
+-            data[i].resize(dims.size());
+-            for(int j = 0; j < dims.size(); j++){
+-                data[i][j] = generate_randomness(dims[j]/N);
+-                for(int k = 0; k < data[i][j].size(); k++) prod[j] *= data[i][j][k];
+-            }
+-        }
+-        input = data[0];
+-        distribute_data_tensor(data);
+-    }else{
+-        vector<F> v;
+-        get_data(v,size/N);
+-        input.resize(dims.size());
+-        int ctr = 0;
+-        for(int i = 0; i < dims.size(); i++){
+-            input[i].resize(dims[i]/N);
+-            for(int j = 0; j < input[i].size(); j++) input[i][j] = v[ctr++];
+-        }
+-    }
+-    //prove_product_opt(input, output, N);
+-    if(rank == 0){
+-        for(int i = 0; i < output.size(); i++){
+-            if(output[i] != prod[i]){
+-                printf("Error %d\n",i);
+-            }
+-        }
+-    }
+-}
+-
+-
+-
+-int main(int argc, char *argv[]){
+-    
+-    /*
+-    vector<F> w,vl,vr,vo,ra,rb,rc;
+-    generate_R1CS_matrixes(1<<atoi(argv[1]), 1);
+-    prepare_witness_data(1<<atoi(argv[1]),w,vl,vr,vo,1);
+-    vector<F> r = generate_randomness(logm);
+-    reduce_R1CS_matrixes(1<<atoi(argv[1]),r,ra,rb,rc);
+-    printf("%d, %d,%d\n",vl.size(),ra.size(),w.size());
+-    F a = random();
+-    F b = random();
+-    F c = random();
+-    
+-    F y = a*evaluate_vector(vl,r)+b*evaluate_vector(vr,r)+c*evaluate_vector(vo,r);
+-    for(int i = 0; i < rc.size(); i++){
+-        y -= (a*ra[i]+b*rb[i]+c*rc[i])*w[i];
+-    }
+-    
+-    if(y != F(0)) printf("Error\n");
+-    exit(-1);
+-    */
+-    
+-    int benchmark = atoi(argv[1]);
+-    int size;
+-    int rank;
+-    
+-
+-
+-    //encode_locally(C,R_shares,500,N,M,k,_k);
+-    MPI_Init (&argc, &argv);
+-    
+-    MPI_Comm_size(MPI_COMM_WORLD, &size); //get number of processes
+-    MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get my process id
+-    
+-    
+-    
+-    
+-    int N = size;
+-    if(rank == 0) printf("Workers: %d\n",size);
+-    int k = N/4;
+-    int _k = N/2;
+-    int M = 1ULL<<(atoi(argv[2]));
+-    
+-    double ps = 0.0;
+-    vector<F> codeword,row_data;
+-    vector<vector<F>> data;
+-    
+-    
+-    //vector<int> dims = {1<<16,1<<14,1<<14};
+-    //test_mult_tree(dims, N);
+-    //generate_R1CS_matrixes(N, 1);
+-    //test_sparse_eval(N, M,1);
+-    
+-    if(benchmark == 0){
+-        int cir = atoi(argv[3]);
+-        if(cir <= 1){
+-            if(argc > 4){
+-                sumcheck_offset = atoi(argv[4]) - (int)log2(N);
+-                PC_offset = atoi(argv[5])- (int)log2(N);
+-                // Calculate x64
+-                multree_offset = atoi(argv[6]) - (int)log2(N);
+-            }
+-            if(isLAN) coPIOP_prove(M, N, _k, k,cir);
+-            else coPIOP_prove_batch(M, N, _k, k,cir);
+-        }else{
+-            data_parallel = true;
+-            coPIOP_prove(M, N, _k, k,1);
+-        }
+-    }else if(benchmark == 1){
+-        // test PCS
+-        rate = atoi(argv[3]);
+-        
+-
+-        vector<F> codeword,row_data,R_shares,coefficients;
+-        MT C;
+-        vector<vector<F>> mask_shares,mask_data,C_mask;
+-        vector<MT> Com_mask;
+-        
+-        int l = (int)(-100.0/(log2(1-0.34*(1-(1.0/(double)rate))*(1.0-(double)_k/(double)N))));
+-        double cm = 0;
+-        dummy_setup(R_shares, mask_shares, N, M, k, _k, l);
+-        prepare_mask_shares(mask_shares, mask_data, C_mask, Com_mask, N, M, k, _k, l);
+-        secret_share_coefficients(coefficients, M, N, _k, k);
+-        
+-        MPI_Barrier(MPI_COMM_WORLD);
+-        pt_cp.reset();
+-        
+-        pt.start();
+-        commit(codeword, row_data,coefficients, R_shares, C, l, k, _k, N);
+-        pt.end();
+-        double commit_time = pt.get_time();
+-        vector<F> r;
+-        for(int i = 0; i < (int)log2(2*M); i++) r.push_back(hash_to_field({}));
+-
+-        pt.start();
+-        open_zk(codeword,C_mask,row_data,mask_data,C,Com_mask,r,F(0),l,k,_k,M,N,ps,false);
+-        pt.end();
+-        double open_time = pt.get_time()-commit_time;
+-        
+-        if(rank == 0){
+-            vector<double> buff(4);
+-            printf("Id : %d, Pt: %lf, CPU Only Pt: %lf, Computation only: %lf, Vt: %lf\n", rank, pt.get_time(),pt_cpu.get_time(),pt_cp.get_time(),vt.get_time());
+-            for(int i = 1; i < N; i++){
+-                MPI_Recv(buff.data(), 4,MPI_DOUBLE,i,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+-                printf("Id : %d, Commit time: %lf, Open time, %lf, Total: %lf, CPU Only Pt: %lf, Computation only: %lf\n", i, buff[0],buff[1],buff[0]+buff[1],buff[2],buff[3]);
+-            }    
+-        }else{
+-            vector<double> buff = {commit_time,open_time,pt_cpu.get_time(),pt_cp.get_time()};
+-            MPI_Send(buff.data(), 4,MPI_DOUBLE,0,0,MPI_COMM_WORLD);   
+-        }
+-        MPI_Barrier(MPI_COMM_WORLD);
+-        vector<double> buff = {vt.get_time(),ps,cm};
+-        if(rank != 0){
+-            MPI_Send(buff.data(),3,MPI_DOUBLE,0,0,MPI_COMM_WORLD);
+-        }else{
+-            double total_vt = vt.get_time();
+-            for(int i = 1; i < N; i++){
+-                MPI_Recv(buff.data(),3,MPI_DOUBLE,i,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+-                total_vt += buff[0];
+-                ps += buff[1];
+-                cm += buff[2];
+-            }
+-            printf("Vt : %lf sec, Ps: %lf KB, Com: %lf MB, Queries: %d\n",total_vt,ps,cm/1024.0,l);
+-        }
+-        
+-    }else if(benchmark == 2){
+-        vector<u64> buff64(2048);
+-        vector<F> buff;
+-        if(rank == 0){
+-            buff = generate_randomness(1024);
+-            field_vector_serialize(buff,buff64);
+-        }
+-        if(M == 1){
+-            pt.start();
+-            MPI_Bcast(buff64.data(),buff64.size(),MPI_UINT64_T,0,MPI_COMM_WORLD);
+-            pt.end();
+-            printf("%lf\n",pt.get_time());
+-        }else{
+-            pt.start();
+-            MPI_Request req;
+-            if(rank == 0){
+-                for(int i = 1; i < N; i++){
+-                    MPI_Isend(buff64.data(),buff64.size(),MPI_UINT64_T,i,0,MPI_COMM_WORLD,&req);
+-                }
+-            }else{
+-                MPI_Irecv(buff64.data(),buff64.size(),MPI_UINT64_T,0,0,MPI_COMM_WORLD,&req);
+-                MPI_Wait(&req,MPI_STATUS_IGNORE);
+-            }
+-            pt.end();
+-            printf("%lf\n",pt.get_time());
+-
+-        }
+-        //printf("Incorrect Benchmark\n");
+-    }else if(benchmark == 3){
+-        vector<u64> buff64(2048),recv_buff(N*2048);
+-        
+-        vector<F> buff;
+-        buff = generate_randomness(1024);
+-        field_vector_serialize(buff,buff64);
+-        if(M == 1){
+-            pt.start();
+-            
+-            MPI_Gather(buff64.data(), buff64.size(), MPI_UINT64_T,
+-               recv_buff.data(), buff64.size(), MPI_UINT64_T, 0,
+-               MPI_COMM_WORLD);
+-
+-            pt.end();
+-             if(rank == 0) printf("%lf\n",pt.get_time());
+-        }else if(M == 2){
+-            pt.start();
+-            if(rank == 0){
+-                vector<MPI_Request> req(N-1);
+-                for(int i = 1; i < N; i++){
+-                    MPI_Recv(buff64.data(),buff64.size(),MPI_UINT64_T,i,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+-                }
+-            
+-            }else{
+-                MPI_Request req;
+-                MPI_Send(buff64.data(),buff64.size(),MPI_UINT64_T,0,0,MPI_COMM_WORLD);
+-            }
+-            pt.end();
+-            if(rank == 0) printf("%lf\n",pt.get_time());
+-        }
+-        else{
+-            pt.start();
+-            if(rank == 0){
+-                vector<vector<u64>> _buff(N-1);
+-                for(int i = 1; i < N; i++){_buff[i-1].resize(buff64.size());}
+-                
+-                vector<MPI_Request> req(N-1);
+-                for(int i = 1; i < N; i++){
+-                    MPI_Irecv(_buff[i-1].data(),_buff[i-1].size(),MPI_UINT64_T,i,0,MPI_COMM_WORLD,&req[i-1]);
+-                }
+-                for(int i = 1; i < N; i++){
+-                    MPI_Wait(&req[i-1],MPI_STATUS_IGNORE);
+-                }
+-            
+-            }else{
+-                MPI_Request req;
+-                MPI_Isend(buff64.data(),buff64.size(),MPI_UINT64_T,0,0,MPI_COMM_WORLD,&req);
+-                MPI_Wait(&req,MPI_STATUS_IGNORE);
+-            }
+-            pt.end();
+-            if(rank == 0)printf("%lf\n",pt.get_time());
+-
+-        }
+-    }else if(benchmark == 4){
+-        PC_offset = 0;
+-        vector<F> poly(M);
+-        for(int i = 0; i < poly.size(); i++){
+-            poly[i] = F(i);
+-        }
+-        vector<F> r = generate_randomness((int)log2(M));
+-        F y  = evaluate_vector(poly,r);
+-        vector<F> arr(M/N);
+-        for(int i = 0; i < M/N; i++){
+-            arr[i] = rank*M/N + i;
+-        }
+-        MT Com; 
+-        plaintext_commit(arr,codeword,row_data,Com,N/2,N);
+-        vector<F> r1,r2,b1,b2;
+-        for(int i = 0; i < (int)log2(N/2); i++) r2.push_back(r[i]);
+-        for(int i = (int)log2(N/2); i < r.size(); i++) r1.push_back(r[i]);
+-        precompute_beta(r1,b1);
+-        precompute_beta(r2,b2);
+-        
+-        open_plaintext(codeword,row_data,b1,b2,Com,y,500,N/2,N,ps,false);
+-        
+-        vector<double> buff = {vt.get_time(),ps,cm};
+-        if(rank != 0){
+-            MPI_Send(buff.data(),3,MPI_DOUBLE,0,0,MPI_COMM_WORLD);
+-        }else{
+-            double total_vt = vt.get_time();
+-            for(int i = 1; i < N; i++){
+-                MPI_Recv(buff.data(),3,MPI_DOUBLE,i,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+-                total_vt += buff[0];
+-                ps += buff[1];
+-                cm += buff[2];
+-            }
+-            printf("Vt : %lf sec, Ps: %lf KB, Com: %lf MB\n",total_vt,ps,cm/1024.0);
+-            printf("Interaction Rounds: %d\n",com_rounds);
+-        }
+-        printf(">>> Rounds: %d\n",com_rounds);
+-    }else if(benchmark == 5){
+-        vector<vector<F>> r1(3),r2(3);
+-        vector<F> arr1(M/N,1);
+-        vector<F> arr2(M/(N),2);
+-        vector<F> arr3(M/(N),3);
+-        vector<vector<F>> codeword(3);
+-        vector<vector<F>> row_data(3);
+-        vector<MT> Com(3);
+-        
+-        
+-        plaintext_commit(arr1,codeword[0],row_data[0],Com[0],N/2,N);
+-        plaintext_commit(arr2,codeword[1],row_data[1],Com[1],N/2,N);
+-        plaintext_commit(arr3,codeword[2],row_data[2],Com[2],N/2,N);
+-        r1[0] = generate_randomness((int)log2(M) - (int)log2(N/2));
+-        r2[0] = generate_randomness((int)log2(N/2));
+-        r1[1] = generate_randomness((int)log2(M) - (int)log2(N/2));
+-        r2[1] = generate_randomness((int)log2(N/2));
+-        r1[2] = generate_randomness((int)log2(M) - (int)log2(N/2));
+-        r2[2] = generate_randomness((int)log2(N/2));
+-        vector<vector<F>> v1(3),v2(3);
+-        for(int i = 0; i < v1.size(); i++) precompute_beta(r1[i],v1[i]);
+-        for(int i = 0; i < v2.size(); i++) precompute_beta(r2[i],v2[i]);
+-        //r11 = generate_randomness();
+-        batch_open(codeword, row_data, v1, v2, Com, {1,2,3}, {500,500,500}, {N/2,N/2,N/2},  N, ps, {false,false,false}, {true,true,true});
+-        double cm = 0.0;
+-        vector<double> buff = {vt.get_time(),ps,cm};
+-        if(rank != 0){
+-            MPI_Send(buff.data(),3,MPI_DOUBLE,0,0,MPI_COMM_WORLD);
+-        }else{
+-            double total_vt = vt.get_time();
+-            for(int i = 1; i < N; i++){
+-                MPI_Recv(buff.data(),3,MPI_DOUBLE,i,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+-                total_vt += buff[0];
+-                ps += buff[1];
+-                cm += buff[2];
+-            }
+-            printf("Vt : %lf sec, Ps: %lf KB, Com: %lf MB\n",total_vt,ps,cm/1024.0);
+-            printf("Interaction Rounds: %d\n",com_rounds);
+-        }
+-        //test_quadratic_sumheck(N,  M);
+-    }else if(benchmark == 6){
+-        prove_R1CS_standard(1<<atoi(argv[2]), atoi(argv[3]));
+-    }else{
+-        sumcheck_offset = atoi(argv[4]) - (int)log2(N);
+-        printf("OK\n");   
+-        test_cubic_sumheck(N,M);
+-        if(rank == 0)printf("%lf,%lf,%lf\n",pt_cp.get_time(),pt.get_time(),sch_com.get_time());
+-    }
+-    
+-    // ==================================================== //
+-    /*
+-    dummy_setup(R_shares, mask_shares, N, M, k, _k, 500);
+-
+-    prepare_mask_shares(mask_shares, mask_data, C_mask, Com_mask, N, M, k, _k, 500);
+-    commit(codeword,row_data,R_shares,Com,500,k,_k,M,N);
+-    open_zk(codeword, C_mask, row_data, mask_data, Com, Com_mask, r, y, 500, k, _k, M, N,ps,vt);
+-    */
+-    
+-    
+-    if (rank == 0) printf("MPI World size = %d processes\n", size);
+-    //else printf("Worker Finalizing ... \n");
+-    MPI_Finalize();
+-    
+-    /*
+-    if(op == 1){
+-        prove_R1CS(size,N,_k,k);
+-    }else if(op == 2){
+-        prove_R1CS_standard(size);    
+-    }else if(op == 3){
+-        emulate_PCS(size,N,k,_k,ps);
+-    }
+-    exit(-1);
+-    */
+-    
+-    return 0;
+-}
+--- a/src/merkle_tree.cpp
++++ b/src/merkle_tree.cpp
+@@ -276,7 +276,7 @@
+                 data[j] = hashes[lvl-1][ i * 2].arr[j];
+             }
+             for(int j = 0; j < 32; j++){
+-                data[j+32] = hashes[lvl-1][ i * 2].arr[j];
++                data[j+32] = hashes[lvl-1][ i * 2 + 1].arr[j];
+             }
+             //hashes[lvl][i].resize(32);
+             blake3_hash(data, hashes[lvl][i].arr);
+--- /dev/null
++++ b/src/nand_input.cpp
+@@ -0,0 +1,55 @@
++#include "nand_input.hpp"
++#include "coPIOP.h"
++#include "utils.hpp"
++#include <mpi.h>
++#include <fstream>
++#include <array>
++#include <stdexcept>
++#include <cstring>
++extern std::vector<std::vector<std::pair<int,int>>> A,B,C;
++extern int logm,logn;
++extern void transpose_R1CS_matrixes();
++namespace {
++std::string directory;
++size_t raw_rows,raw_wires,padded;
++uint64_t read_u64(std::istream& f){unsigned char b[8];f.read((char*)b,8);if(!f)throw std::runtime_error("short NAND file");uint64_t x=0;for(int i=0;i<8;i++)x|=uint64_t(b[i])<<(8*i);return x;}
++void require(bool ok,const char*s){if(!ok)throw std::runtime_error(s);}
++void magic(std::istream&f,const char*s){char b[8];f.read(b,8);require(bool(f)&&!memcmp(b,s,8),"NAND file format");}
++size_t pow2(size_t n){size_t x=1;while(x<n)x*=2;return x;}
++}
++bool nand_active(){return !directory.empty();}
++size_t nand_size(){return padded;}
++void nand_load(const std::string& path){
++ directory=path;std::ifstream f(path+"/relation.bin",std::ios::binary);magic(f,"PNXOR001");
++ raw_rows=read_u64(f);raw_wires=read_u64(f);padded=read_u64(f);
++ require(raw_rows>0&&raw_wires>0&&padded==pow2(padded)&&padded>=raw_rows&&padded>=raw_wires&&padded<(1u<<29),"NAND dimensions");
++ logm=logn=0;for(size_t x=padded;x>1;x/=2){++logm;++logn;}
++}
++void nand_matrices(){
++ std::ifstream f(directory+"/relation.bin",std::ios::binary);magic(f,"PNXOR001");
++ require(read_u64(f)==raw_rows&&read_u64(f)==raw_wires&&read_u64(f)==padded,"NAND dimensions changed");
++ A.assign(raw_rows,{});B=A;C=A;std::array<decltype(A)*,3> matrices{&A,&B,&C};
++ for(size_t row=0;row<raw_rows;row++)for(auto*matrix:matrices){size_t count=read_u64(f);require(count<=3,"XOR fanin");for(size_t j=0;j<count;j++){size_t wire=read_u64(f);require(wire<raw_wires,"NAND wire index");(*matrix)[row].push_back({int(wire),int(row)});}}
++ require(f.peek()==EOF,"trailing NAND relation");transpose_R1CS_matrixes();
++}
++void nand_witness(std::vector<F>&w,std::vector<F>&l,std::vector<F>&r,std::vector<F>&o){
++ std::ifstream f(directory+"/witness.bin",std::ios::binary);magic(f,"PNXORW01");require(read_u64(f)==raw_wires,"NAND witness dimension");
++ w.assign(padded,F(0));l.assign(padded,F(0));r=l;o=l;
++ for(size_t i=0;i<raw_wires;i++){int b=f.get();require(b==0||b==1||b==2,"XOR signed witness");w[i]=b==2?F(0)-F(1):F(b);}
++ require(f.peek()==EOF&&w[0]==F(1),"NAND constant or witness trailer");
++ std::ifstream p(directory+"/public-output.bin",std::ios::binary);int bit=p.get();require((bit==0||bit==1)&&p.peek()==EOF,"NAND public bit");
++ require(w[raw_wires-1]==F(1)-F(2)*F(bit),"NAND public output mismatch");
++ if(A.empty())nand_matrices();
++ for(size_t row=0;row<raw_rows;row++){
++  for(auto term:A[row])l[row]+=w[term.first];
++  for(auto term:B[row])r[row]+=w[term.first];
++  for(auto term:C[row])o[row]+=w[term.first];
++  require(l[row]*r[row]==o[row],"NAND R1CS unsatisfied");
++ }
++}
++void nand_check(int N){
++ int rank;MPI_Comm_rank(MPI_COMM_WORLD,&rank);
++ // Each small native check uses actual field rows; this is not a verifier for the SNARK.
++ if(rank==0){nand_matrices();std::vector<F>w,l,r,o;nand_witness(w,l,r,o);printf("{\"event\":\"native_xor_relation_checked\",\"rows\":%zu,\"wires\":%zu,\"padded\":%zu,\"N\":%d}\n",raw_rows,raw_wires,padded,N);fflush(stdout);}
++ MPI_Barrier(MPI_COMM_WORLD);
++}
+--- /dev/null
++++ b/src/nand_input.hpp
+@@ -0,0 +1,10 @@
++#pragma once
++#include "config_pc.hpp"
++#include <string>
++#include <vector>
++void nand_load(const std::string&);
++bool nand_active();
++size_t nand_size();
++void nand_matrices();
++void nand_witness(std::vector<F>&,std::vector<F>&,std::vector<F>&,std::vector<F>&);
++void nand_check(int);
+--- a/src/utils.cpp
++++ b/src/utils.cpp
+@@ -1,1328 +1,1330 @@
+-//
+-// Created by 69029 on 6/23/2021.
+-//
+-#include "utils.hpp"
+-#include "config_pc.hpp"
+-#include <math.h>
+-#include <omp.h>
+-#include "polynomial.h"
+-#include <algorithm>
+-
+-extern int MAX_CHUNCK;
+-extern double proving_time;
+-extern unsigned long int mul_counter;
+-extern vector<F> x_transcript,y_transcript;
+-extern F current_randomness;
+-extern int threads;
+-extern vector<vector<pair<int,int>>> A,B,C;
+-vector<F> w;
+-
+-size_t next_pow2(size_t N){
+-    if(1<<(int)log2(N) == N){
+-        return N;
+-    }
+-    return (1<<(1+(int)(log2(N))));
+-}
+-
+-void pad_vector(vector<F> &v){
+-    size_t size = v.size();
+-    F zero = F(0);
+-    if(1ULL<<((int)log2(size)) == v.size())return;
+-    v.resize(1ULL<<((int)log2(size) + 1),zero);
+-}
+-
+-void init_matrix(F **&M, int rows, int cols){
+-    M = new F*[rows]; 
+-    for(int i  = 0; i < rows; i++){
+-        M[i] = new F[cols];
+-        for(int j = 0; j < cols;j ++){
+-            M[i][j] = F(0);
+-        }
+-    }
+-}
+-
+-void free_matrix(F **M,int rows){
+-    for(int i = 0; i < rows; i++){
+-        //delete [] (M[i]);
+-        free(M[i]);
+-        //M[i] = NULL;
+-    }
+-    //delete[] M;
+-    free(M);
+-    M = nullptr;
+-    //free(M);
+-    //M = NULL;
+-}
+-
+-
+-F *init_vector( int rows){
+-    F *M = (F*)malloc(rows*sizeof(F));
+-    for(int i  = 0; i < rows; i++){
+-        M[i] = F(0);
+-    }
+-    return M;
+-}
+-void free_vector(F *M){
+-    free(M);
+-    M = NULL;
+-}
+-
+-
+-void field_vector_serialize(vector<F> &v, vector<u64> &v_int){
+-    v_int.clear();
+-    v_int.resize(v.size()*2);
+-    for(int i = 0; i < v.size(); i++){
+-        v_int[2*i] = v[i].real;
+-        v_int[2*i+1] = v[i].img;
+-    }
+-}
+-
+-
+-void field_vector_deserialize(vector<u64> &v_int, vector<F> &v){
+-    v.clear();
+-    v.resize(v_int.size()/2);
+-    for(int i = 0; i < v.size(); i++){
+-        v[i].real = v_int[2*i] ;
+-        v[i].img = v_int[2*i+1];
+-    }
+-}
+-
+-void compute_convolution(vector<vector<F>> Lv, vector<F> &B){
+-    int conv_size = 1;
+-	for(int i = 0; i < Lv.size(); i++){
+-		conv_size = conv_size*Lv[i].size();
+-		//printf("%d ", Lv[i].size());
+-	}
+-    F *_B = (F *)malloc((1)*sizeof(F));
+-    _B[0] = F(1);
+-    
+-	//printf("\n");
+-    B.resize(conv_size);
+-    int size = 1;
+-    for(int i = Lv.size()-1; i >= 0; i--){
+-        size *= Lv[i].size();
+-        F *temp_B = (F *)malloc(size*sizeof(F));
+-        if(i == 0){
+-            for(int j = 0; j < conv_size/Lv[i].size(); j++){
+-                for(int k = 0; k < Lv[i].size(); k++){
+-                    B[j* Lv[i].size() + k] = _B[j]*Lv[i][k];
+-                }
+-            }
+-        }else{
+-            for(int j = 0; j < size/Lv[i].size(); j++){
+-                for(int k = 0; k < Lv[i].size(); k++){
+-                    temp_B[j* Lv[i].size() + k] = _B[j]*Lv[i][k];
+-                }
+-            }
+-        }
+-        _B = temp_B;
+-    }
+-}
+-
+-void my_fft(vector<F> &arr, vector<F> &w, vector<u32> &rev, F ilen,  bool flag){
+-    u32 len = arr.size();
+-    assert(w.size() == rev.size());
+-    
+-    if(!flag){
+-        //if (flag) F::inv(w[1], w[1]);
+-        for (u32 i = 0; i < len; ++i)
+-            if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
+-  
+-        F u,v;
+-        for (u32 i = 2; i <= len; i <<= 1){
+-            for (u32 j = 0; j < len; j += i)
+-                for (u32 k = 0; k < (i >> 1); ++k) {
+-                    u = arr[j + k];
+-                    v = arr[j + k + (i >> 1)] * w[len / i * k];
+-                    arr[j + k] = u + v;
+-                    arr[j + k + (i >> 1)] = u - v;
+-                }
+-        }
+-
+-    }else{
+-
+-    
+-        F u,v;
+-        for (u32 i = 0; i < len; ++i)
+-            if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
+-      
+-    for (u32 i = 2; i <= len; i <<= 1)
+-        for (u32 j = 0; j < len; j += i)
+-            for (u32 k = 0; k < (i >> 1); ++k) {
+-                    u = arr[j + k];
+-                    v = arr[j + k + (i >> 1)] * w[len / i * k];
+-                    arr[j + k] = u + v;
+-                    arr[j + k + (i >> 1)] = u - v;
+-                
+-            }
+-    
+-        if(flag){
+-            for (u32 i = 0; i < len; ++i){
+-                arr[i] = arr[i] * ilen;
+-            }
+-        }
+-       
+-    }
+-}
+-
+-
+-vector<F> compute_lagrange_coeff(F omega, F r, int degree){
+-	vector<F> pows;
+-    
+-    vector<F> L1(degree);
+-	F A; 
+-    A = A.fastPow(r,degree);
+-    A = A-F(1);
+-    
+-    pows.push_back(F(1));
+-	for(int i = 1; i < degree; i++){
+-		F num = pows[i-1]*omega;
+-		if(num == F(1)){
+-			break;
+-		}
+-		pows.push_back(num);
+-	}
+-	for(int i = 0; i < pows.size(); i++){
+-		F temp = F(degree)*(r-pows[i]);
+-		temp = temp.inv();
+-		L1[i] = temp*A*pows[i];
+-	}	
+-	return L1;
+-}
+-void precompute_beta(vector<F> r,vector<F> &B){
+-    B.resize(1<<r.size());
+-    F *_B = (F *)malloc((1<<r.size())*sizeof(F));
+-    B[0] = F(1);
+-    _B[0] = F(1);
+-    for(int i = 0; i < r.size(); i++){
+-        
+-        F *temp_B = (F *)malloc((1<<i)*sizeof(F));
+-        
+-        //vector<F> temp_B(1<<i);
+-        //#pragma omp parallel for
+-        for(int j = 0; j < (1<<i); j++){
+-            temp_B[j] = (_B[j]);
+-        }
+-      
+-        //if((1ULL<<i) > 1024){
+-            //#pragma omp parallel
+-            //{
+-             //   int t = 1;//omp_get_thread_num();
+-           ///     for(int j = t*(1<<i)/threads; j < (t+1)*(1<<i)/threads; j++){
+-             ///       int num = j<<1;
+-             //       F temp = r[r.size() - 1 -i]*temp_B[j];
+-              //      _B[num] = temp_B[j] - temp;
+-            //        _B[num+1] = temp;
+-          //      }
+-            //}
+-        //}else{
+-            for(int j = 0; j < (1<<i); j++){
+-                int num = j<<1;
+-                F temp = r[r.size() - 1 -i]*temp_B[j];
+-                _B[num] = temp_B[j] - temp;
+-                _B[num+1] = temp;
+-            }
+-        //}
+-        
+-        
+-        free(temp_B);
+-     
+-    }
+-    
+-    for(int i = 0; i < 1<<r.size(); i++){
+-        B[i] = _B[i];
+-    }
+-    free(_B);
+-    //return B;
+-}
+-void initHalfTable(vector<F> &beta_f, vector<F> &beta_s, const vector<F>::const_iterator &r, const F &init, u64 first_half, u64 second_half) {
+-    beta_f.at(0) = init;
+-    beta_s.at(0) = F_ONE;
+-
+-    for (u32 i = 0; i < first_half; ++i) {
+-        for (u32 j = 0; j < (1ULL << i); ++j) {
+-            auto tmp = beta_f.at(j) * r[i];
+-            beta_f.at(j | (1ULL << i)) = tmp;
+-            beta_f.at(j) = beta_f[j] - tmp;
+-        }
+-    }
+-
+-    for (u32 i = 0; i < second_half; ++i) {
+-        for (u32 j = 0; j < (1ULL << i); ++j) {
+-            auto tmp = beta_s[j] * r[(i + first_half)];
+-            beta_s[j | (1ULL << i)] = tmp;
+-            beta_s[j] = beta_s[j] - tmp;
+-        }
+-    }
+-}
+-
+-void initBetaTable(vector<F> &beta_g, u8 gLength, const vector<F>::const_iterator &r, const F &init) {
+-    if (gLength == -1) return;
+-
+-    static vector<F> beta_f, beta_s;
+-    int first_half = gLength >> 1, second_half = gLength - first_half;
+-    u32 mask_fhalf = (1ULL << first_half) - 1;
+-
+-    assert(beta_g.size() >= 1ULL << gLength);
+-    myResize(beta_f, 1ULL << first_half);
+-    myResize(beta_s, 1ULL << second_half);
+-    if (init != F_ZERO) {
+-        initHalfTable(beta_f, beta_s, r, init, first_half, second_half);
+-        for (u32 i = 0; i < (1ULL << gLength); ++i)
+-            beta_g.at(i) = beta_f.at(i & mask_fhalf) * beta_s.at(i >> first_half);
+-    } else for (u32 i = 0; i < (1ULL << gLength); ++i)
+-            beta_g.at(i) = F_ZERO;
+-
+-    
+-}
+-
+-void initBetaTable(vector<F> &beta_g, int gLength, const vector<F>::const_iterator &r_0,
+-                   const vector<F>::const_iterator &r_1, const F &alpha, const F &beta) {
+-    static vector<F> beta_f, beta_s;
+-    int first_half = gLength >> 1, second_half = gLength - first_half;
+-    u32 mask_fhalf = (1ULL << first_half) - 1;
+-    assert(beta_g.size() >= 1ULL << gLength);
+-    myResize(beta_f, 1ULL << first_half);
+-    myResize(beta_s, 1ULL << second_half);
+-    if (beta != F_ZERO) {
+-        initHalfTable(beta_f, beta_s, r_1, beta, first_half, second_half);
+-        for (u32 i = 0; i < (1ULL << gLength); ++i)
+-            beta_g[i] = beta_f[i & mask_fhalf] * beta_s[i >> first_half];
+-    } else for (u32 i = 0; i < (1ULL << gLength); ++i)
+-            beta_g[i] = F_ZERO;
+-
+-    if (alpha == F_ZERO) return;
+-    initHalfTable(beta_f, beta_s, r_0, alpha, first_half, second_half);
+-    assert(beta_g.size() >= 1ULL << gLength);
+-    for (u32 i = 0; i < (1ULL << gLength); ++i)
+-        beta_g[i] = beta_g[i] + beta_f[i & mask_fhalf] * beta_s[i >> first_half];
+-}
+-
+-/*F getRootOfUnit(int n) {
+-    F res = -F_ONE;
+-    if (!n) return F_ONE;
+-    while (--n) {
+-        bool b = F::squareRoot(res, res);
+-        assert(b);
+-    }
+-    return res;
+-}
+-*/
+-
+-// return the evaluations 
+-vector<vector<F>> F_batch_quad_sumcheck_rest_functionality(F y, F b, vector<vector<F>> &_v1, 
+-                                                                     vector<vector<F>> &_v2, 
+-                                                                     vector<vector<F>> &_v3, 
+-                                                                     vector<vector<F>> &_v4, 
+-                                                                     vector<vector<F>> &_r1, 
+-                                                                     vector<vector<F>> &_r2, 
+-                                                                     int _k, int k,
+-                                                                    double &pt, double &vt, double &ps){
+-    vector<F> v1(k),v2(k),v3(k),v4(k);
+-    vector<F> r1(k),r2(k);
+-    for(int i = 0; i < k; i++){
+-        v1[i] = _v1[i*_v1.size()/_k][0];
+-        v2[i] = _v2[i*_v1.size()/_k][0];
+-        v3[i] = _v3[i*_v1.size()/_k][0];
+-        v4[i] = _v4[i*_v1.size()/_k][0];
+-        r1[i] = _r1[i*_v1.size()/_k][0];
+-        r2[i] = _r2[i*_v1.size()/_k][0];
+-    }
+-    /*
+-    fft(v1,(int)log2(v1.size()),true);
+-    fft(v2,(int)log2(v2.size()),true);
+-    fft(r1,(int)log2(r1.size()),true);
+-    fft(r2,(int)log2(r2.size()),true);
+-    v1.resize(_k);
+-    v2.resize(_k);
+-    r1.resize(_k);
+-    r2.resize(_k);
+-    */
+-    int rounds = (int)log2(k);
+-    vector<F> challenges(rounds);
+-    clock_t t1 = clock();
+-    for(int i = 0; i < rounds; i++){
+-        quadratic_poly p = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
+-        quadratic_poly p_r = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
+-        linear_poly l1,l2;
+-        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
+-            l1 = linear_poly(v1[2*j+1]-v1[2*j],v1[2*j]);
+-            l2 = linear_poly(v2[2*j+1]-v2[2*j],v2[2*j]);
+-            p = p + l1*l2;
+-            l1 = linear_poly(v3[2*j+1]-v3[2*j],v3[2*j]);
+-            l2 = linear_poly(v4[2*j+1]-v4[2*j],v4[2*j]);
+-            p = p + l1*l2;
+-            l1 = linear_poly(r1[2*j+1]-r1[2*j],r1[2*j]);
+-            l2 = linear_poly(r2[2*j+1]-r2[2*j],r2[2*j]);
+-            p_r = p_r + l1*l2;
+-        }
+-        p.a = p.a + b*p_r.a;p.b = p.b + b*p_r.b;p.c = p.c + b*p_r.c;
+-        clock_t tv1 = clock();
+-        if(p.eval(0) + p.eval(1) != y){
+-            printf("Error in sumcheck functionality %d\n",i);
+-            exit(-1);
+-        }
+-        ps += 3*sizeof(F)/1024.0;
+-
+-        challenges[i] = rand();
+-        y = p.eval(challenges[i]);
+-        clock_t tv2 = clock();
+-        vt += (double)(tv2-tv1)/(double)CLOCKS_PER_SEC;
+-        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
+-            v1[j] = challenges[i]*(v1[2*j+1]-v1[2*j]) + v1[2*j];
+-            v2[j] = challenges[i]*(v2[2*j+1]-v2[2*j]) + v2[2*j];
+-            v3[j] = challenges[i]*(v3[2*j+1]-v3[2*j]) + v3[2*j];
+-            v4[j] = challenges[i]*(v4[2*j+1]-v4[2*j]) + v4[2*j];
+-            r1[j] = challenges[i]*(r1[2*j+1]-r1[2*j]) + r1[2*j];
+-            r2[j] = challenges[i]*(r2[2*j+1]-r2[2*j]) + r2[2*j];
+-        }        
+-    }
+-    clock_t t2 = clock();
+-    pt += _v1.size()*(double)(t2-t1)/(double)CLOCKS_PER_SEC;
+-    
+-    return {{v1[0],v2[0],v3[0],v4[0],r1[0],r2[0]},challenges};
+-}
+-
+-vector<vector<F>> F_quad_sumcheck_rest_functionality(F y, F b, vector<vector<F>> &_v1, vector<vector<F>> &_v2, vector<vector<F>> &_r1, vector<vector<F>> &_r2, int _k, int k,
+-                  double &pt, double &vt, double &ps){
+-    vector<F> v1(k),v2(k);
+-    vector<F> r1(k),r2(k);
+-    for(int i = 0; i < k; i++){
+-        v1[i] = _v1[i*_v1.size()/_k][0];
+-        v2[i] = _v2[i*_v1.size()/_k][0];
+-        r1[i] = _r1[i*_v1.size()/_k][0];
+-        r2[i] = _r2[i*_v1.size()/_k][0];
+-    }
+-    /*
+-    fft(v1,(int)log2(v1.size()),true);
+-    fft(v2,(int)log2(v2.size()),true);
+-    fft(r1,(int)log2(r1.size()),true);
+-    fft(r2,(int)log2(r2.size()),true);
+-    v1.resize(_k);
+-    v2.resize(_k);
+-    r1.resize(_k);
+-    r2.resize(_k);
+-    */
+-    int rounds = (int)log2(k);
+-    vector<F> challenges(rounds);
+-    clock_t t1 = clock();
+-    for(int i = 0; i < rounds; i++){
+-        quadratic_poly p = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
+-        quadratic_poly p_r = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
+-        linear_poly l1,l2;
+-        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
+-            l1 = linear_poly(v1[2*j+1]-v1[2*j],v1[2*j]);
+-            l2 = linear_poly(v2[2*j+1]-v2[2*j],v2[2*j]);
+-            p = p + l1*l2;
+-            l1 = linear_poly(r1[2*j+1]-r1[2*j],r1[2*j]);
+-            l2 = linear_poly(r2[2*j+1]-r2[2*j],r2[2*j]);
+-            p_r = p_r + l1*l2;
+-        }
+-        p.a = p.a + b*p_r.a;p.b = p.b + b*p_r.b;p.c = p.c + b*p_r.c;
+-        clock_t tv1 = clock();
+-        if(p.eval(0) + p.eval(1) != y){
+-            printf("Error in sumcheck functionality %d\n",i);
+-            exit(-1);
+-        }
+-        ps += 3*sizeof(F)/1024.0;
+-
+-        challenges[i] = rand();
+-        y = p.eval(challenges[i]);
+-        clock_t tv2 = clock();
+-        vt += (double)(tv2-tv1)/(double)CLOCKS_PER_SEC;
+-        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
+-            v1[j] = challenges[i]*(v1[2*j+1]-v1[2*j]) + v1[2*j];
+-            v2[j] = challenges[i]*(v2[2*j+1]-v2[2*j]) + v2[2*j];
+-            r1[j] = challenges[i]*(r1[2*j+1]-r1[2*j]) + r1[2*j];
+-            r2[j] = challenges[i]*(r2[2*j+1]-r2[2*j]) + r2[2*j];
+-        }        
+-    }
+-    clock_t t2 = clock();
+-    pt += _v1.size()*(double)(t2-t1)/(double)CLOCKS_PER_SEC;
+-    
+-    return {{v1[0],v2[0],r1[0],r2[0]},challenges};
+-}
+-
+-vector<vector<F>> F_zero_check_rest_functionality(F y, F b, vector<vector<F>> &_v1, 
+-                                vector<vector<F>> &_v2, 
+-                                vector<vector<F>> &_v3, 
+-                                vector<F> &beta1, 
+-                                vector<F> beta2, 
+-                                vector<vector<F>> &_r1, 
+-                                vector<vector<F>> &_r2, 
+-                                int _k, int k,
+-                                double &pt, double &vt, double &ps){
+-    vector<F> v1(k),v2(k),v3(k);
+-    vector<F> r1(k),r2(k);
+-    for(int i = 0; i < k; i++){
+-        v1[i] = _v1[i*_v1.size()/_k][0];
+-        v2[i] = _v2[i*_v1.size()/_k][0];
+-        v3[i] = _v3[i*_v1.size()/_k][0];
+-        r1[i] = _r1[i*_v1.size()/_k][0];
+-        r2[i] = _r2[i*_v1.size()/_k][0];
+-    }
+-    for(int i = 0; i < k; i++){
+-        beta2[i] = beta2[i]*beta1[0];
+-    }
+-    /*
+-    fft(v1,(int)log2(v1.size()),true);
+-    fft(v2,(int)log2(v2.size()),true);
+-    fft(r1,(int)log2(r1.size()),true);
+-    fft(r2,(int)log2(r2.size()),true);
+-    v1.resize(_k);
+-    v2.resize(_k);
+-    r1.resize(_k);
+-    r2.resize(_k);
+-    */
+-    int rounds = (int)log2(k);
+-    vector<F> challenges(rounds);
+-    clock_t t1 = clock();
+-    for(int i = 0; i < rounds; i++){
+-        quadratic_poly p = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
+-        quadratic_poly p_r = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
+-        linear_poly _p = linear_poly(F_ZERO,F_ZERO);
+-        cubic_poly poly = cubic_poly(F_ZERO,F_ZERO,F_ZERO,F_ZERO);
+-        linear_poly l1,l2;
+-        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
+-            l1 = linear_poly(v1[2*j+1]-v1[2*j],v1[2*j]);
+-            l2 = linear_poly(v2[2*j+1]-v2[2*j],v2[2*j]);
+-            p = l1*l2;
+-            l1 = linear_poly(r1[2*j+1]-r1[2*j],r1[2*j]);
+-            l2 = linear_poly(r2[2*j+1]-r2[2*j],r2[2*j]);
+-            p_r = l1*l2;
+-            _p = linear_poly(v3[2*j+1]-v3[2*j],v3[2*j]);
+-            p.a = p.a + b*p_r.a;p.b = p.b + b*p_r.b - _p.a;p.c = p.c + b*p_r.c-_p.b;
+-            poly = poly + p* linear_poly(beta2[2*j+1]-beta2[2*j],beta2[2*j]);
+-        }
+-        clock_t tv1 = clock();
+-        if(poly.eval(0) + poly.eval(1) != y){
+-            printf("Error in sumcheck functionality %d\n",i);
+-            exit(-1);
+-        }
+-        ps += 4*sizeof(F)/1024.0;
+-
+-        challenges[i] = rand();
+-        y = poly.eval(challenges[i]);
+-        clock_t tv2 = clock();
+-        vt += (double)(tv2-tv1)/(double)CLOCKS_PER_SEC;
+-        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
+-            v1[j] = challenges[i]*(v1[2*j+1]-v1[2*j]) + v1[2*j];
+-            v2[j] = challenges[i]*(v2[2*j+1]-v2[2*j]) + v2[2*j];
+-            v3[j] = challenges[i]*(v3[2*j+1]-v3[2*j]) + v3[2*j];
+-            r1[j] = challenges[i]*(r1[2*j+1]-r1[2*j]) + r1[2*j];
+-            r2[j] = challenges[i]*(r2[2*j+1]-r2[2*j]) + r2[2*j];
+-            beta2[j] = challenges[i]*(beta2[2*j+1]-beta2[2*j]) + beta2[2*j];
+-        }        
+-    }
+-    clock_t t2 = clock();
+-    pt += _v1.size()*(double)(t2-t1)/(double)CLOCKS_PER_SEC;
+-    
+-    return {{v1[0],v2[0],v3[0],beta2[0],r1[0],r2[0]},challenges};
+-}
+-
+-
+-F F_ip_functionality( vector<vector<F>> &R1, vector<vector<F>> &R2 , vector<F> &beta1 ,vector<F> &beta2, int _k, int k){
+-    vector<F> y_vectors(R1.size(),0);
+-    F y = F(0);
+-    for(int i = 0; i < R1.size(); i++){
+-        if(beta1.size()){
+-            for(int j = 0; j < R1[i].size(); j++){
+-                y_vectors[i] += beta1[j]*R1[i][j]*R2[i][j];
+-            }
+-        }else{
+-            for(int j = 0; j < R1[i].size(); j++){
+-                y_vectors[i] += R1[i][j]*R2[i][j];
+-            }
+-        }
+-    }
+-    //fft(y_vectors,(int)log2(y_vectors.size()),true);
+-    //y_vectors.resize(_k);fft(y_vectors,(int)log2(_k),false);
+-    if(beta2.size()){
+-        for(int i = 0; i < k; i++){
+-            y += beta2[i]*y_vectors[i*R1.size()/_k];
+-        }
+-    }else{
+-        for(int i = 0; i < k; i++){
+-            y += y_vectors[i*R1.size()/_k];
+-        }
+-    }
+-    return y;
+-}
+-
+-F F_ip_functionality2( vector<vector<F>> &R1, vector<vector<F>> &R2, vector<vector<F>> &R3, vector<F> &beta1 ,vector<F> &beta2, int _k, int k){
+-    vector<F> y_vectors(R1.size(),0);
+-    F y = F(0);
+-    for(int i = 0; i < R1.size(); i++){
+-        if(beta1.size()){
+-            for(int j = 0; j < R1[i].size(); j++){
+-                y_vectors[i] += beta1[j]*(R1[i][j]*R2[i][j]-R3[i][j]);
+-            }
+-        }else{
+-            for(int j = 0; j < R1[i].size(); j++){
+-                y_vectors[i] += R1[i][j]*R2[i][j] - R3[i][j]; 
+-            }
+-        }
+-    }
+-    //fft(y_vectors,(int)log2(y_vectors.size()),true);
+-    //y_vectors.resize(_k);fft(y_vectors,(int)log2(_k),false);
+-    if(beta2.size()){
+-        for(int i = 0; i < k; i++){
+-            y += beta2[i]*y_vectors[i*R1.size()/_k];
+-        }
+-    }else{
+-        for(int i = 0; i < k; i++){
+-            y += y_vectors[i*R1.size()/_k];
+-        }
+-    }
+-    return y;
+-}
+-
+-F F_eval_functionality( vector<vector<F>> &R, vector<F> &beta1 ,vector<F> &beta2, int _k){
+-    vector<F> y_vectors(R.size(),0);
+-    F y = F(0);
+-    for(int i = 0; i < R.size(); i++){
+-        if(beta1.size()){
+-            for(int j = 0; j < R[i].size(); j++){
+-                y_vectors[i] += beta1[j]*R[i][j];
+-            }
+-        }else{
+-            for(int j = 0; j < R[i].size(); j++){
+-                y_vectors[i] += R[i][j];
+-            }
+-        }
+-    }
+-    fft(y_vectors,(int)log2(y_vectors.size()),true);
+-    y_vectors.resize(_k);fft(y_vectors,(int)log2(_k),false);
+-    if(beta2.size()){
+-        for(int i = 0; i < _k; i++){
+-            y += beta2[i]*y_vectors[i];
+-        }
+-    }else{
+-        for(int i = 0; i < _k; i++){
+-            y += y_vectors[i];
+-        }
+-    }
+-    return y;
+-}
+-
+-vector<int> convert2vector(vector<vector<int>> &M){
+-    vector<int> V;
+-    for(int i = 0; i < M.size(); i++){
+-        for(int j = 0; j < M[i].size(); j++){
+-            V.push_back(M[i][j]);
+-        }
+-    }
+-    return V;
+-}
+-
+-vector<F> convert2vector(vector<vector<F>> M){
+-    vector<F> V;
+-    for(int i = 0; i < M.size(); i++){
+-        for(int j = 0; j < M[i].size(); j++){
+-            V.push_back(M[i][j]);
+-        }
+-    }
+-    return V;
+-}
+-
+-vector<F> tensor2vector(vector<vector<vector<vector<F>>>> M){
+-    vector<F> V;
+-
+-    for(int i = 0; i < M.size(); i++){
+-        for(int j = 0; j < M[i].size(); j++){
+-            for(int k = 0; k < M[i][j].size(); k++){
+-                for(int l = 0; l < M[i][j][k].size(); l++){
+-                    V.push_back(M[i][j][k][l]);
+-                }
+-            }
+-        }
+-    }
+-    return V;
+-}
+-
+-
+-vector<vector<vector<vector<F>>>> vector2tensor(vector<F> v,vector<vector<vector<vector<F>>>> M,int w_pad){
+-    int N = M[0].size();
+-    int w = M[0][0].size();
+-    vector<vector<vector<vector<F>>>> M_new(M.size());
+-    for(int i = 0; i < M.size(); i++){
+-        M_new[i].resize(M[i].size());
+-        for(int j = 0; j < M[i].size(); j++){
+-            M_new[i][j].resize(w_pad);
+-            for(int k = 0; k < w_pad; k++){
+-                M_new[i][j][k].resize(w_pad);
+-                for(int l = 0; l < w_pad; l++){
+-                    M_new[i][j][k][l] = v[i*N*w*w + j*w*w + k*w + l];
+-                    //V.push_back(M[i][j][k][l]);
+-                }
+-            }
+-        }
+-    }
+-    return M_new;
+-}
+-
+-vector<vector<F>> convert2matrix(vector<F> arr, int d1, int d2){
+-    vector<vector<F>> U(d1);
+-    for(int i = 0; i < d1; i++){
+-        U[i].resize(d2);
+-        for(int j = 0; j < d2; j++){
+-            U[i][j] = arr[i*d2+j];
+-        }
+-    }
+-    return U;
+-}
+-
+-
+-vector<vector<F>> transpose(vector<vector<F>> M){
+-    vector<vector<F>> M_t(M[0].size());
+-    for(int i = 0; i < M[0].size(); i++){
+-        M_t[i].resize(M.size());
+-        for(int j = 0; j < M.size(); j++){
+-            M_t[i][j] = M[j][i];
+-        }
+-    }
+-    return M_t;
+-}
+-
+-vector<vector<F>> rotate(vector<vector<F>> M){
+-    vector<vector<F>> M_r(M.size());
+-    for(int i = 0; i < M.size(); i++){
+-        M_r[i].resize(M[i].size());
+-        for(int j = 0; j < M[i].size(); j++){
+-            M_r[i][j] = M[M.size()-1-i][M[i].size()-1-j];
+-        }
+-    }
+-    return M_r;
+-}
+-
+-
+-
+-F getRootOfUnity(int n) {
+-     F rou;
+-      rou.img = 1033321771269002680L;
+-        rou.real = 2147483648L;
+-
+-        assert(n <= 61);
+-
+-        for(int i = 0; i < 62 - n; ++i)
+-            rou = rou * rou;
+-
+-    return rou;
+-}
+-
+-
+-
+-void fft(vector<F> &arr, int logn, bool flag) {
+-//    cerr << "fft: " << endl;
+-//    for (auto x: arr) cerr << x << ' ';
+-//    cerr << endl;
+-    std::vector<u32> rev;
+-    std::vector<F> w;
+-
+-    u32 len = 1ULL << logn;
+-    assert(arr.size() == len);
+-
+-    rev.resize(len);
+-    w.resize(len);
+-
+-    rev[0] = 0;
+-    for (u32 i = 1; i < len; ++i)
+-        rev[i] = rev[i >> 1] >> 1 | (i & 1) << (logn - 1);
+-
+-    w[0] = F_ONE;
+-
+-    // Get root of unity
+-    F rou = getRootOfUnity(logn);
+-    
+-    //assert(log_order <= 61);
+-
+-    //for (int i = 0; i < 62 - logn; ++i)
+-    //    rou = rou * rou;
+-
+-    w[1] = rou;
+-    
+-    
+-    
+-    
+-    if (flag) w[1] = w[1].inv();
+-    for (u32 i = 2; i < len; ++i) w[i] = w[i - 1] * w[1];
+-    for (u32 i = 0; i < len; ++i)
+-        if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
+-
+-    
+-    F u,v;
+-    for (u32 i = 2; i <= len; i <<= 1)
+-        for (u32 j = 0; j < len; j += i)
+-            for (u32 k = 0; k < (i >> 1); ++k) {
+-                u = arr[j + k];
+-                v = arr[j + k + (i >> 1)] * w[len / i * k];
+-                arr[j + k] = u + v;
+-                arr[j + k + (i >> 1)] = u - v;
+-            }
+-
+-    if (flag) {
+-        F ilen;
+-        ilen = F(len).inv();
+-        if(ilen*len != 1){
+-            printf("Error in inv\n");
+-            exit(-1);
+-        }
+-        for (u32 i = 0; i < len; ++i){
+-            arr[i] = arr[i] * ilen;
+-            mul_counter++;
+-        }
+-    }
+-}
+-
+-void __fft(F *&arr,  int logn, bool flag){
+-     std::vector<u32> rev;
+-    //std::vector<F> w;
+-  
+-    u32 len = 1ULL << logn;
+-    //assert(arr.size() == len);
+-    F rou = getRootOfUnity(logn);
+-    
+-    rev.resize(len);
+-    //w.resize(len);
+-
+-    rev[0] = 0;
+-    for (u32 i = 1; i < len; ++i)
+-        rev[i] = rev[i >> 1] >> 1 | (i & 1) << (logn - 1);
+-
+-    
+-    // Get root of unity
+-    
+-    //assert(log_order <= 61);
+-
+-    //for (int i = 0; i < 62 - logn; ++i)
+-    //    rou = rou * rou;
+-
+-    
+-    
+-    
+-    for (u32 i = 0; i < len; ++i)
+-        if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
+-   
+-     
+-    F *_w = new F[len];
+-        _w[0] = F_ONE;
+-        _w[1] = rou;
+-        if (flag) _w[1] = _w[1].inv();
+-        for (u32 i = 2; i < len; ++i) _w[i] = _w[i - 1] * _w[1];
+-    /*
+-    if(w.size() != len){
+-        printf("Initializing %d\n",len);
+-        w.clear();
+-        w.resize(len);
+-        w[0] = F_ONE;
+-        w[1] = rou;
+-        if (flag) w[1] = w[1].inv();
+-        for (u32 i = 2; i < len; ++i) w[i] = w[i - 1] * w[1];
+-    }
+-    */
+-    
+-    F u,v;
+-    for (u32 i = 2; i <= len; i <<= 1)
+-        for (u32 j = 0; j < len; j += i)
+-            for (u32 k = 0; k < (i >> 1); ++k) {
+-                u = arr[j + k];
+-                v = arr[j + k + (i >> 1)] * _w[len / i * k];
+-                arr[j + k] = u + v;
+-                arr[j + k + (i >> 1)] = u - v;
+-            }
+-
+-    delete[] _w;
+-   
+-    
+-    if (flag) {
+-        F ilen;
+-        ilen = F(len).inv();
+-        if(ilen*len != 1){
+-            printf("Error in inv\n");
+-            exit(-1);
+-        }
+-        for (u32 i = 0; i < len; ++i){
+-            arr[i] = arr[i] * ilen;
+-            mul_counter++;
+-        }
+-    }
+-    
+-    
+-}
+-
+-void _fft(F *arr, int logn, bool flag) {
+-//    cerr << "fft: " << endl;
+-//    for (auto x: arr) cerr << x << ' ';
+-//    cerr << endl;
+-   
+-    std::vector<u32> rev;
+-    //std::vector<F> w;
+-
+-    u32 len = 1ULL << logn;
+-    //assert(arr.size() == len);
+-    F rou = getRootOfUnity(logn);
+-    
+-    rev.resize(len);
+-    //w.resize(len);
+-
+-    rev[0] = 0;
+-    for (u32 i = 1; i < len; ++i)
+-        rev[i] = rev[i >> 1] >> 1 | (i & 1) << (logn - 1);
+-
+-    
+-    // Get root of unity
+-    
+-    //assert(log_order <= 61);
+-
+-    //for (int i = 0; i < 62 - logn; ++i)
+-    //    rou = rou * rou;
+-
+-    
+-    
+-    
+-   
+-    
+-    
+-    for (u32 i = 0; i < len; ++i)
+-        if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
+-    
+-     if(w.size() != len){
+-        //printf("Initializing\n");
+-        w.clear();
+-        w.resize(len);
+-        w[0] = F_ONE;
+-        w[1] = rou;
+-        if (flag) w[1] = w[1].inv();
+-        for (u32 i = 2; i < len; ++i) w[i] = w[i - 1] * w[1];
+-    }
+-    F u,v;
+-    for (u32 i = 2; i <= len; i <<= 1)
+-        for (u32 j = 0; j < len; j += i)
+-            for (u32 k = 0; k < (i >> 1); ++k) {
+-                u = arr[j + k];
+-                v = arr[j + k + (i >> 1)] * w[len / i * k];
+-                arr[j + k] = u + v;
+-                arr[j + k + (i >> 1)] = u - v;
+-            }
+-
+-    
+-    if (flag) {
+-        F ilen;
+-        ilen = F(len).inv();
+-        if(ilen*len != 1){
+-            printf("Error in inv\n");
+-            exit(-1);
+-        }
+-        for (u32 i = 0; i < len; ++i){
+-            arr[i] = arr[i] * ilen;
+-            mul_counter++;
+-        }
+-    }
+-}
+-
+-
+-
+-void phiPowInit(vector<F> &phi_mul, int n, bool isIFFT) {
+-    u32 N = 1ULL << n;
+-    F rou = getRootOfUnity(n);
+-
+-    /*
+-    rou.img = 1033321771269002680L;
+-    rou.real = 2147483648L;
+-    for (int i = 0; i < 62 - n; ++i)
+-        rou = rou * rou;
+-    */
+-    
+-    F phi = rou;
+-    if (isIFFT) phi = phi.inv();
+-    phi_mul[0] = F_ONE;
+-    for (u32 i = 1; i < N; ++i) phi_mul[i] = phi_mul[i - 1] * phi;
+-}
+-
+-void phiGInit(vector<F> &phi_g, const vector<F>::const_iterator &rx, const F &scale, int n, bool isIFFT) {
+-    vector<F> phi_mul(1 << n);
+-    phiPowInit(phi_mul, n, isIFFT);
+-
+-    if (isIFFT) {
+-//        cerr << "==" << endl;
+-//        cerr << "gLength: " << n << endl;
+-//        for (int i = 0; i < n - 1; ++i) {
+-//            cerr << rx[i];
+-//            cerr << endl;
+-//        }
+-        phi_g[0] = phi_g[1] = scale;
+-        for (int i = 1; i <= n; ++i)
+-            for (u32 b = 0; b < (1ULL << (i - 1)); ++b) {
+-                u32 l = b, r = b ^ (1ULL << (i - 1));
+-                int m = n - i;
+-                F tmp1 = F_ONE - rx[m], tmp2 = rx[m] * phi_mul[b << m];
+-                phi_g[r] = phi_g[l] * (tmp1 - tmp2);
+-                phi_g[l] = phi_g[l] * (tmp1 + tmp2);
+-            }
+-
+-
+-        
+-    } else {
+-//        cerr << "==" << endl;
+-//        cerr << "gLength: " << n << endl;
+-//        for (int i = 0; i < n; ++i) {
+-//            cerr << rx[i];
+-//            cerr << endl;
+-//        }
+-        phi_g[0] = scale;
+-        /*
+-        
+-        for(int i = 0; i < n; i++){
+-            for(int j = 1ULL << (i+1)-1; j >= 0; j--){
+-                phi_g[j] = phi_g[j%(1ULL << i)]*(F(1)-rx[i] + rx[i]*phi_mul[j]);
+-            }
+-        }
+-        */
+-
+-        for (int i = 1; i < n; ++i){
+-            for (u32 b = 0; b < (1ULL << (i - 1)); ++b) {
+-                u32 l = b, r = b ^ (1ULL << (i - 1));
+-                int m = n - i;
+-                
+-                F tmp1 = F_ONE - rx[m], tmp2 = rx[m] * phi_mul[b << m];
+-                //printf("%d,%d\n",r,l );
+-                phi_g[r] = phi_g[l] * (tmp1 - tmp2);
+-                phi_g[l] = phi_g[l] * (tmp1 + tmp2);
+-            }
+-
+-        }
+-        for (u32 b = 0; b < (1ULL << (n - 1)); ++b) {
+-            u32 l = b;
+-
+-            F tmp1 = F_ONE - rx[0], tmp2 = rx[0] * phi_mul[b];
+-            phi_g[l] = phi_g[l] * (tmp1 + tmp2);
+-            
+-        }
+-        
+-    }
+-}
+-
+-
+-vector<F> prepare_matrix(vector<vector<F>> M, vector<F> r){
+-    vector<F> V;
+-    int n = M.size();
+-    int offset = M[0].size()/2;
+-    //printf(">> %d,%d,%d\n",n, M[0].size(),r.size() );
+-    for(int k = 0; k < r.size(); k++){
+-        for(int i = 0; i < n; i++){
+-            for(int j = 0; j < offset; j++){
+-                M[i][j] = M[i][2*j] + r[k]*(M[i][2*j+1]-M[i][2*j]);
+-            }
+-        }
+-        offset = offset/2;
+-    }
+-    for(int i = 0; i < n; i++){
+-        V.push_back(M[i][0]);
+-    }
+-    return V;
+-}
+-
+-F evaluate_matrix(vector<vector<F>> M, vector<F> r1, vector<F> r2){
+-    vector<F> v = prepare_matrix(transpose(M),r1);
+-    for(int i = 0; i < r2.size(); i++){
+-        int L = 1 << (r2.size() - 1 - i);
+-
+-        for(int j = 0; j < L; j++){
+-            v[j] = (F(1)-r2[i])*v[2*j] + r2[i]*v[2*j+1];
+-        }
+-    }
+-    return v[0];
+-}
+-
+-F evaluate_vector(vector<F> v,vector<F> r){
+-    vector<F> _r;
+-    for(int i = 0; i < (int)log2(v.size()); i++){
+-        _r.push_back(r[i]);
+-    }
+-    r = _r;
+-    for(int i = 0; i < r.size(); i++){
+-        int L = 1 << (r.size() - 1 - i);
+-        for(int j = 0; j < L; j++){
+-            v[j] = (F(1)-r[i])*v[2*j] + r[i]*v[2*j+1];
+-        }
+-    }
+-    return v[0];    
+-}
+-
+-
+-
+-
+-vector<vector<F>> generate_tables(){
+-    int N = 4;
+-    int no_tables = 5;
+-    vector<vector<F>> tables(no_tables);
+-    vector<int> max_num;
+-    int exponent = 0,last_exponent = 1;
+-    float num = 0;
+-    
+-    for(int i = 0; i < tables.size(); i++){
+-        for(int j = 0; j < 1<<N; j++){
+-            exponent = exponent + last_exponent; 
+-            F num;
+-            num = random();//.setByCSPRNG();
+-            tables[i].push_back(num);
+-            //tables[i].push_back(quantize(exp(-dequantize(exponent,1))));
+-        }
+-        last_exponent = exponent;
+-        exponent = 0;
+-    }
+-    
+-    //printf("%f,%f\n",dequantize(prod,level),exp(-0.1) );
+-    return tables;
+-}
+-
+-
+-vector<F> get_predicates(int size){
+-    vector<F> poly;
+-    for(int i = 0; i < 1<<size; i++){
+-        poly.push_back(F(rand()%2));
+-    }
+-    return poly;
+-}
+-
+-vector<vector<F>> get_poly(int size){
+-    vector<vector<F>> poly(1<<size);
+-
+-    for(int i = 0; i < 1<<size; i++){
+-        poly[i].resize(1);
+-        poly[i][0] = F(rand()%1024);
+-    }
+-    return poly;
+-}
+-void get_int64(vector<unsigned long long int> &arr, __hhash_digest hash){
+-    unsigned long long int* res_array = reinterpret_cast<unsigned long long int*>(&hash.h0);
+-    for (int i = 0; i < 2; ++i) {
+-        arr[i] = res_array[i];
+-    }
+-    res_array = reinterpret_cast<unsigned long long int*>(&hash.h1);
+-    for(int i = 2; i < 4; i++){
+-        arr[i] = res_array[i-2];        
+-    }
+-}
+-
+-void get_field_vector(vector<F> &h_f, vector<__hhash_digest> &h){
+-    F pow1 = F(1);
+-    F pow2 = F(1ULL<<32)*F(1ULL<<32);
+-    F pow3 = pow2*pow2;
+-    F pow4 = pow3*pow3;
+-    vector<unsigned long long int> arr(4);
+-    for(int i = 0; i < h_f.size(); i++){
+-        get_int64(arr,h[i]);
+-        h_f[i] = F(arr[0]) + pow2*arr[1] + pow3*arr[2]+pow4*arr[3];
+-    }
+-    
+-}
+-
+-vector<F> generate_randomness(int size){
+-    vector<F> x;
+-    F c;
+-    for(int i = 0; i < size; i++){
+-        if(i % 100 == 0){
+-            c = random();
+-        }
+-        x.push_back(c + F(rand()));
+-    }
+-    return x;
+-}
+-void compute_binary(vector<F> r, vector<F> &B){
+-    B.resize(1<<r.size());
+-    int num;
+-    for(int i = 0; i < 1<<r.size(); i++){
+-        num = i;
+-        B[i] = F(1);
+-        for(int j = 0; j < r.size(); j++){
+-            if(num & 1 == 1){
+-                B[i] = B[i]*r[j];
+-            }
+-            //else{
+-            //    B[i] = B[i]*(F(1)-r[j]);
+-            //}
+-            num = num >> 1;
+-        }
+-
+-    }
+-}
+-
+-vector<F> convert_to_field(vector<int> &arr){
+-    vector<F> buff(arr.size());
+-    for(int i  =0 ; i < arr.size(); i++){
+-        buff[i] = F(arr[i]);
+-    }
+-    return buff;
+-}
+-
+-F _beta(int idx, vector<F> r){
+-    F mul = F(1);
+-    for(int i = 0; i < r.size(); i++){
+-        if(idx & 1 == 1){
+-            mul *= r[i];
+-        }
+-        else{
+-            mul *= (F(1)-r[i]);
+-        }
+-        idx = idx>>1;
+-    }
+-    return mul;
+-}
+-
+-F beta_identity(vector<F> r1, vector<F> r2){
+-    F eval = F(1);
+-    for(int i = 0; i < r1.size(); i++){
+-        eval *= ((F(1)-r1[i])*(F(1)-r2[i])  + r1[i]*r2[i]);
+-    }
+-    return eval;
+-}
+-
+-F get_offset_product(int size,int pos,vector<F> r){
+-    vector<F> bits;
+-    F prod = F(1);
+-    for(int i = 0; i < r.size(); i++){
+-        if(pos & 1){
+-            bits.push_back(F(1));
+-        }else{
+-            bits.push_back(F(0));
+-        }
+-        pos = pos >> 1;
+-    }
+-    for(int i = 0; i < r.size()-(int)log2(size); i++){
+-        prod *= (bits[r.size()-1-i]*r[r.size()-1-i]+ (F(1)-bits[r.size()-1-i])*(F(1) - r[r.size()-1-i]));
+-    }
+-    return prod;
+-}
+-
+-
+-void prepare_witness_data(size_t size, vector<F> &witness, vector<F> &vL, vector<F> &vR, vector<F> &vO, int type){
+-    if(type == 0){
+-        witness.resize(2*size,0);
+-        vL.resize(size,0);
+-        vR.resize(size,0);
+-        vO.resize(size,0);
+-        for(int i = 0; i < size; i++){
+-            witness[i] = random();
+-        }
+-        
+-        int n = size;
+-        int m = 0;
+-        for(int j = 0; j < (int)log2(size); j++){
+-            for(int i = 0; i < size/(1<<(j+1)); i++){
+-                if(n+i >= 2*size){
+-                    printf("Error\n");
+-                    exit(-1);
+-                }
+-                witness[n+i] =  witness[2*i + m]*witness[2*i+m + 1];            
+-            }
+-            m += size/(1<<j);
+-            n += size/(1<<(j+1));
+-        }
+-        for(int i = 0; i < size-1; i++){
+-            
+-            vL[i] = witness[A[i][0].first];
+-            vR[i] = witness[B[i][0].first];
+-            vO[i] = witness[C[i][0].first];
+-        }
+-        
+-        for(int i = 0; i < vO.size(); i++){
+-            if(vL[i]*vR[i] != vO[i]){
+-                printf("Error\n");
+-                exit(-1);
+-            }
+-        }
+-    }else{
+-        witness = generate_randomness(size/16);
+-        for(int i = size/16; i < A.size(); i++){
+-            if(A[i].size() == 0) continue;
+-            F new_wire = 0;
+-            for(int j = 0; j < A[i].size(); j++){
+-                new_wire += witness[A[i][j].first];
+-            }
+-            vL.push_back(new_wire);
+-            new_wire *= witness[B[i][0].first];
+-            vR.push_back(witness[B[i][0].first]);
+-            witness.push_back(new_wire);
+-            vO.push_back(new_wire);
+-        }
+-        for(int i = 0; i < vL.size(); i++){
+-            if(vL[i]*vR[i] != vO[i]){
+-                printf("Error in proving data consistency\n");
+-                exit(-1);
+-            }
+-        }
+-        
+-        witness.resize(next_pow2(witness.size()),F(0));
+-        vL.resize(next_pow2(vL.size()),F(0));
+-        vR.resize(next_pow2(vR.size()),F(0));
+-        vO.resize(next_pow2(vO.size()),F(0));
+-    }
+-    
+-}
+-
+-
+-
+-F sequence_eval(int size, vector<F> r1, vector<F> r2){
+-    vector<F> r; 
+-    
+-    for(int i = 0; i < (int)log2(size)-r2.size(); i++) r.push_back(r1[i]);
+-    for(int i = 0; i < r2.size(); i++) r.push_back(r2[i]); 
+-    F sum = F(0);
+-    for(int i = 0; i < (int)log2(size); i++){
+-        sum += r[(int)log2(size)-1-i]*F(size/(1<<(i+1)));
+-    }
+-    return sum;
+-}
+-
+-F betas_eval(int size, vector<F> r11, vector<F> r12, vector<F> r21, vector<F> r22){
+-    F prod = F(1);
+-    //reverse(r12.begin(),r12.end());
+-    //printf("%d,%d,%d\n",r11.size(),r12.size(), (int)log2(size));
+-    for(int i = 0; i < r12.size(); i++){
+-        prod *= (r12[i]*r22[i] + (F(1) - r12[i])*(F(1)- r22[i]));
+-    }
+-    for(int i = 0; i < r11.size(); i++){
+-        prod *= (r11[i]*r21[i] + (F(1) - r11[i])*(F(1)- r21[i]));
+-    }
+-    return prod;
+-}
+-
+-F sparrow_V_check(vector<F> poly, int degree){
+-    F sum = F(0);
+-    if(degree <= 16){
+-        for(int i = poly.size()-degree; i < poly.size(); i++) sum += poly[i];
+-        
+-    }else{
+-        for(int i = 0; i < degree; i++) sum += poly[2*i];
+-    }
+-    
+-    return sum;
+-}
+-
+-F evaluate_poly_extended(vector<F> poly, vector<F> poly_sum, F r, int c){
+-	F sum = F(0);
+-	int idx = 0;
+-	if(c <= 4){
+-        vector<F> L = compute_lagrange_coeff(getRootOfUnity(c),r,1ULL<<(c));
+-	    for(int i = 0; i < (1<<c); i++){
+-            for(int j = i+1; j < (1<<c); j++){
+-                sum += L[i]*L[j]*poly[idx];
+-                idx++;
+-            }
+-        }
+-        for(int i = 0; i < (1<<c); i++){
+-            sum += L[i]*L[i]*poly[idx];
+-            if(poly_sum.size()) sum += L[i]*poly_sum[i];
+-            idx++;
+-        }
+-    }else{
+-        vector<F> L = compute_lagrange_coeff(getRootOfUnity(c+1),r,1ULL<<(c+1));
+-	    for(int i = 0; i < L.size(); i++){
+-            sum +=  poly[i]*L[i];
+-        }
+-    }
+-    
+-	
+-    return sum;
++#include "nand_input.hpp"
++//
++// Created by 69029 on 6/23/2021.
++//
++#include "utils.hpp"
++#include "config_pc.hpp"
++#include <math.h>
++#include <omp.h>
++#include "polynomial.h"
++#include <algorithm>
++
++extern int MAX_CHUNCK;
++extern double proving_time;
++extern unsigned long int mul_counter;
++extern vector<F> x_transcript,y_transcript;
++extern F current_randomness;
++extern int threads;
++extern vector<vector<pair<int,int>>> A,B,C;
++vector<F> w;
++
++size_t next_pow2(size_t N){
++    if(1<<(int)log2(N) == N){
++        return N;
++    }
++    return (1<<(1+(int)(log2(N))));
++}
++
++void pad_vector(vector<F> &v){
++    size_t size = v.size();
++    F zero = F(0);
++    if(1ULL<<((int)log2(size)) == v.size())return;
++    v.resize(1ULL<<((int)log2(size) + 1),zero);
++}
++
++void init_matrix(F **&M, int rows, int cols){
++    M = new F*[rows]; 
++    for(int i  = 0; i < rows; i++){
++        M[i] = new F[cols];
++        for(int j = 0; j < cols;j ++){
++            M[i][j] = F(0);
++        }
++    }
++}
++
++void free_matrix(F **M,int rows){
++    for(int i = 0; i < rows; i++){
++        //delete [] (M[i]);
++        free(M[i]);
++        //M[i] = NULL;
++    }
++    //delete[] M;
++    free(M);
++    M = nullptr;
++    //free(M);
++    //M = NULL;
++}
++
++
++F *init_vector( int rows){
++    F *M = (F*)malloc(rows*sizeof(F));
++    for(int i  = 0; i < rows; i++){
++        M[i] = F(0);
++    }
++    return M;
++}
++void free_vector(F *M){
++    free(M);
++    M = NULL;
++}
++
++
++void field_vector_serialize(vector<F> &v, vector<u64> &v_int){
++    v_int.clear();
++    v_int.resize(v.size()*2);
++    for(int i = 0; i < v.size(); i++){
++        v_int[2*i] = v[i].real;
++        v_int[2*i+1] = v[i].img;
++    }
++}
++
++
++void field_vector_deserialize(vector<u64> &v_int, vector<F> &v){
++    v.clear();
++    v.resize(v_int.size()/2);
++    for(int i = 0; i < v.size(); i++){
++        v[i].real = v_int[2*i] ;
++        v[i].img = v_int[2*i+1];
++    }
++}
++
++void compute_convolution(vector<vector<F>> Lv, vector<F> &B){
++    int conv_size = 1;
++	for(int i = 0; i < Lv.size(); i++){
++		conv_size = conv_size*Lv[i].size();
++		//printf("%d ", Lv[i].size());
++	}
++    F *_B = (F *)malloc((1)*sizeof(F));
++    _B[0] = F(1);
++    
++	//printf("\n");
++    B.resize(conv_size);
++    int size = 1;
++    for(int i = Lv.size()-1; i >= 0; i--){
++        size *= Lv[i].size();
++        F *temp_B = (F *)malloc(size*sizeof(F));
++        if(i == 0){
++            for(int j = 0; j < conv_size/Lv[i].size(); j++){
++                for(int k = 0; k < Lv[i].size(); k++){
++                    B[j* Lv[i].size() + k] = _B[j]*Lv[i][k];
++                }
++            }
++        }else{
++            for(int j = 0; j < size/Lv[i].size(); j++){
++                for(int k = 0; k < Lv[i].size(); k++){
++                    temp_B[j* Lv[i].size() + k] = _B[j]*Lv[i][k];
++                }
++            }
++        }
++        _B = temp_B;
++    }
++}
++
++void my_fft(vector<F> &arr, vector<F> &w, vector<u32> &rev, F ilen,  bool flag){
++    u32 len = arr.size();
++    assert(w.size() == rev.size());
++    
++    if(!flag){
++        //if (flag) F::inv(w[1], w[1]);
++        for (u32 i = 0; i < len; ++i)
++            if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
++  
++        F u,v;
++        for (u32 i = 2; i <= len; i <<= 1){
++            for (u32 j = 0; j < len; j += i)
++                for (u32 k = 0; k < (i >> 1); ++k) {
++                    u = arr[j + k];
++                    v = arr[j + k + (i >> 1)] * w[len / i * k];
++                    arr[j + k] = u + v;
++                    arr[j + k + (i >> 1)] = u - v;
++                }
++        }
++
++    }else{
++
++    
++        F u,v;
++        for (u32 i = 0; i < len; ++i)
++            if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
++      
++    for (u32 i = 2; i <= len; i <<= 1)
++        for (u32 j = 0; j < len; j += i)
++            for (u32 k = 0; k < (i >> 1); ++k) {
++                    u = arr[j + k];
++                    v = arr[j + k + (i >> 1)] * w[len / i * k];
++                    arr[j + k] = u + v;
++                    arr[j + k + (i >> 1)] = u - v;
++                
++            }
++    
++        if(flag){
++            for (u32 i = 0; i < len; ++i){
++                arr[i] = arr[i] * ilen;
++            }
++        }
++       
++    }
++}
++
++
++vector<F> compute_lagrange_coeff(F omega, F r, int degree){
++	vector<F> pows;
++    
++    vector<F> L1(degree);
++	F A; 
++    A = A.fastPow(r,degree);
++    A = A-F(1);
++    
++    pows.push_back(F(1));
++	for(int i = 1; i < degree; i++){
++		F num = pows[i-1]*omega;
++		if(num == F(1)){
++			break;
++		}
++		pows.push_back(num);
++	}
++	for(int i = 0; i < pows.size(); i++){
++		F temp = F(degree)*(r-pows[i]);
++		temp = temp.inv();
++		L1[i] = temp*A*pows[i];
++	}	
++	return L1;
++}
++void precompute_beta(vector<F> r,vector<F> &B){
++    B.resize(1<<r.size());
++    F *_B = (F *)malloc((1<<r.size())*sizeof(F));
++    B[0] = F(1);
++    _B[0] = F(1);
++    for(int i = 0; i < r.size(); i++){
++        
++        F *temp_B = (F *)malloc((1<<i)*sizeof(F));
++        
++        //vector<F> temp_B(1<<i);
++        //#pragma omp parallel for
++        for(int j = 0; j < (1<<i); j++){
++            temp_B[j] = (_B[j]);
++        }
++      
++        //if((1ULL<<i) > 1024){
++            //#pragma omp parallel
++            //{
++             //   int t = 1;//omp_get_thread_num();
++           ///     for(int j = t*(1<<i)/threads; j < (t+1)*(1<<i)/threads; j++){
++             ///       int num = j<<1;
++             //       F temp = r[r.size() - 1 -i]*temp_B[j];
++              //      _B[num] = temp_B[j] - temp;
++            //        _B[num+1] = temp;
++          //      }
++            //}
++        //}else{
++            for(int j = 0; j < (1<<i); j++){
++                int num = j<<1;
++                F temp = r[r.size() - 1 -i]*temp_B[j];
++                _B[num] = temp_B[j] - temp;
++                _B[num+1] = temp;
++            }
++        //}
++        
++        
++        free(temp_B);
++     
++    }
++    
++    for(int i = 0; i < 1<<r.size(); i++){
++        B[i] = _B[i];
++    }
++    free(_B);
++    //return B;
++}
++void initHalfTable(vector<F> &beta_f, vector<F> &beta_s, const vector<F>::const_iterator &r, const F &init, u64 first_half, u64 second_half) {
++    beta_f.at(0) = init;
++    beta_s.at(0) = F_ONE;
++
++    for (u32 i = 0; i < first_half; ++i) {
++        for (u32 j = 0; j < (1ULL << i); ++j) {
++            auto tmp = beta_f.at(j) * r[i];
++            beta_f.at(j | (1ULL << i)) = tmp;
++            beta_f.at(j) = beta_f[j] - tmp;
++        }
++    }
++
++    for (u32 i = 0; i < second_half; ++i) {
++        for (u32 j = 0; j < (1ULL << i); ++j) {
++            auto tmp = beta_s[j] * r[(i + first_half)];
++            beta_s[j | (1ULL << i)] = tmp;
++            beta_s[j] = beta_s[j] - tmp;
++        }
++    }
++}
++
++void initBetaTable(vector<F> &beta_g, u8 gLength, const vector<F>::const_iterator &r, const F &init) {
++    if (gLength == -1) return;
++
++    static vector<F> beta_f, beta_s;
++    int first_half = gLength >> 1, second_half = gLength - first_half;
++    u32 mask_fhalf = (1ULL << first_half) - 1;
++
++    assert(beta_g.size() >= 1ULL << gLength);
++    myResize(beta_f, 1ULL << first_half);
++    myResize(beta_s, 1ULL << second_half);
++    if (init != F_ZERO) {
++        initHalfTable(beta_f, beta_s, r, init, first_half, second_half);
++        for (u32 i = 0; i < (1ULL << gLength); ++i)
++            beta_g.at(i) = beta_f.at(i & mask_fhalf) * beta_s.at(i >> first_half);
++    } else for (u32 i = 0; i < (1ULL << gLength); ++i)
++            beta_g.at(i) = F_ZERO;
++
++    
++}
++
++void initBetaTable(vector<F> &beta_g, int gLength, const vector<F>::const_iterator &r_0,
++                   const vector<F>::const_iterator &r_1, const F &alpha, const F &beta) {
++    static vector<F> beta_f, beta_s;
++    int first_half = gLength >> 1, second_half = gLength - first_half;
++    u32 mask_fhalf = (1ULL << first_half) - 1;
++    assert(beta_g.size() >= 1ULL << gLength);
++    myResize(beta_f, 1ULL << first_half);
++    myResize(beta_s, 1ULL << second_half);
++    if (beta != F_ZERO) {
++        initHalfTable(beta_f, beta_s, r_1, beta, first_half, second_half);
++        for (u32 i = 0; i < (1ULL << gLength); ++i)
++            beta_g[i] = beta_f[i & mask_fhalf] * beta_s[i >> first_half];
++    } else for (u32 i = 0; i < (1ULL << gLength); ++i)
++            beta_g[i] = F_ZERO;
++
++    if (alpha == F_ZERO) return;
++    initHalfTable(beta_f, beta_s, r_0, alpha, first_half, second_half);
++    assert(beta_g.size() >= 1ULL << gLength);
++    for (u32 i = 0; i < (1ULL << gLength); ++i)
++        beta_g[i] = beta_g[i] + beta_f[i & mask_fhalf] * beta_s[i >> first_half];
++}
++
++/*F getRootOfUnit(int n) {
++    F res = -F_ONE;
++    if (!n) return F_ONE;
++    while (--n) {
++        bool b = F::squareRoot(res, res);
++        assert(b);
++    }
++    return res;
++}
++*/
++
++// return the evaluations 
++vector<vector<F>> F_batch_quad_sumcheck_rest_functionality(F y, F b, vector<vector<F>> &_v1, 
++                                                                     vector<vector<F>> &_v2, 
++                                                                     vector<vector<F>> &_v3, 
++                                                                     vector<vector<F>> &_v4, 
++                                                                     vector<vector<F>> &_r1, 
++                                                                     vector<vector<F>> &_r2, 
++                                                                     int _k, int k,
++                                                                    double &pt, double &vt, double &ps){
++    vector<F> v1(k),v2(k),v3(k),v4(k);
++    vector<F> r1(k),r2(k);
++    for(int i = 0; i < k; i++){
++        v1[i] = _v1[i*_v1.size()/_k][0];
++        v2[i] = _v2[i*_v1.size()/_k][0];
++        v3[i] = _v3[i*_v1.size()/_k][0];
++        v4[i] = _v4[i*_v1.size()/_k][0];
++        r1[i] = _r1[i*_v1.size()/_k][0];
++        r2[i] = _r2[i*_v1.size()/_k][0];
++    }
++    /*
++    fft(v1,(int)log2(v1.size()),true);
++    fft(v2,(int)log2(v2.size()),true);
++    fft(r1,(int)log2(r1.size()),true);
++    fft(r2,(int)log2(r2.size()),true);
++    v1.resize(_k);
++    v2.resize(_k);
++    r1.resize(_k);
++    r2.resize(_k);
++    */
++    int rounds = (int)log2(k);
++    vector<F> challenges(rounds);
++    clock_t t1 = clock();
++    for(int i = 0; i < rounds; i++){
++        quadratic_poly p = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
++        quadratic_poly p_r = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
++        linear_poly l1,l2;
++        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
++            l1 = linear_poly(v1[2*j+1]-v1[2*j],v1[2*j]);
++            l2 = linear_poly(v2[2*j+1]-v2[2*j],v2[2*j]);
++            p = p + l1*l2;
++            l1 = linear_poly(v3[2*j+1]-v3[2*j],v3[2*j]);
++            l2 = linear_poly(v4[2*j+1]-v4[2*j],v4[2*j]);
++            p = p + l1*l2;
++            l1 = linear_poly(r1[2*j+1]-r1[2*j],r1[2*j]);
++            l2 = linear_poly(r2[2*j+1]-r2[2*j],r2[2*j]);
++            p_r = p_r + l1*l2;
++        }
++        p.a = p.a + b*p_r.a;p.b = p.b + b*p_r.b;p.c = p.c + b*p_r.c;
++        clock_t tv1 = clock();
++        if(p.eval(0) + p.eval(1) != y){
++            printf("Error in sumcheck functionality %d\n",i);
++            exit(-1);
++        }
++        ps += 3*sizeof(F)/1024.0;
++
++        challenges[i] = rand();
++        y = p.eval(challenges[i]);
++        clock_t tv2 = clock();
++        vt += (double)(tv2-tv1)/(double)CLOCKS_PER_SEC;
++        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
++            v1[j] = challenges[i]*(v1[2*j+1]-v1[2*j]) + v1[2*j];
++            v2[j] = challenges[i]*(v2[2*j+1]-v2[2*j]) + v2[2*j];
++            v3[j] = challenges[i]*(v3[2*j+1]-v3[2*j]) + v3[2*j];
++            v4[j] = challenges[i]*(v4[2*j+1]-v4[2*j]) + v4[2*j];
++            r1[j] = challenges[i]*(r1[2*j+1]-r1[2*j]) + r1[2*j];
++            r2[j] = challenges[i]*(r2[2*j+1]-r2[2*j]) + r2[2*j];
++        }        
++    }
++    clock_t t2 = clock();
++    pt += _v1.size()*(double)(t2-t1)/(double)CLOCKS_PER_SEC;
++    
++    return {{v1[0],v2[0],v3[0],v4[0],r1[0],r2[0]},challenges};
++}
++
++vector<vector<F>> F_quad_sumcheck_rest_functionality(F y, F b, vector<vector<F>> &_v1, vector<vector<F>> &_v2, vector<vector<F>> &_r1, vector<vector<F>> &_r2, int _k, int k,
++                  double &pt, double &vt, double &ps){
++    vector<F> v1(k),v2(k);
++    vector<F> r1(k),r2(k);
++    for(int i = 0; i < k; i++){
++        v1[i] = _v1[i*_v1.size()/_k][0];
++        v2[i] = _v2[i*_v1.size()/_k][0];
++        r1[i] = _r1[i*_v1.size()/_k][0];
++        r2[i] = _r2[i*_v1.size()/_k][0];
++    }
++    /*
++    fft(v1,(int)log2(v1.size()),true);
++    fft(v2,(int)log2(v2.size()),true);
++    fft(r1,(int)log2(r1.size()),true);
++    fft(r2,(int)log2(r2.size()),true);
++    v1.resize(_k);
++    v2.resize(_k);
++    r1.resize(_k);
++    r2.resize(_k);
++    */
++    int rounds = (int)log2(k);
++    vector<F> challenges(rounds);
++    clock_t t1 = clock();
++    for(int i = 0; i < rounds; i++){
++        quadratic_poly p = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
++        quadratic_poly p_r = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
++        linear_poly l1,l2;
++        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
++            l1 = linear_poly(v1[2*j+1]-v1[2*j],v1[2*j]);
++            l2 = linear_poly(v2[2*j+1]-v2[2*j],v2[2*j]);
++            p = p + l1*l2;
++            l1 = linear_poly(r1[2*j+1]-r1[2*j],r1[2*j]);
++            l2 = linear_poly(r2[2*j+1]-r2[2*j],r2[2*j]);
++            p_r = p_r + l1*l2;
++        }
++        p.a = p.a + b*p_r.a;p.b = p.b + b*p_r.b;p.c = p.c + b*p_r.c;
++        clock_t tv1 = clock();
++        if(p.eval(0) + p.eval(1) != y){
++            printf("Error in sumcheck functionality %d\n",i);
++            exit(-1);
++        }
++        ps += 3*sizeof(F)/1024.0;
++
++        challenges[i] = rand();
++        y = p.eval(challenges[i]);
++        clock_t tv2 = clock();
++        vt += (double)(tv2-tv1)/(double)CLOCKS_PER_SEC;
++        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
++            v1[j] = challenges[i]*(v1[2*j+1]-v1[2*j]) + v1[2*j];
++            v2[j] = challenges[i]*(v2[2*j+1]-v2[2*j]) + v2[2*j];
++            r1[j] = challenges[i]*(r1[2*j+1]-r1[2*j]) + r1[2*j];
++            r2[j] = challenges[i]*(r2[2*j+1]-r2[2*j]) + r2[2*j];
++        }        
++    }
++    clock_t t2 = clock();
++    pt += _v1.size()*(double)(t2-t1)/(double)CLOCKS_PER_SEC;
++    
++    return {{v1[0],v2[0],r1[0],r2[0]},challenges};
++}
++
++vector<vector<F>> F_zero_check_rest_functionality(F y, F b, vector<vector<F>> &_v1, 
++                                vector<vector<F>> &_v2, 
++                                vector<vector<F>> &_v3, 
++                                vector<F> &beta1, 
++                                vector<F> beta2, 
++                                vector<vector<F>> &_r1, 
++                                vector<vector<F>> &_r2, 
++                                int _k, int k,
++                                double &pt, double &vt, double &ps){
++    vector<F> v1(k),v2(k),v3(k);
++    vector<F> r1(k),r2(k);
++    for(int i = 0; i < k; i++){
++        v1[i] = _v1[i*_v1.size()/_k][0];
++        v2[i] = _v2[i*_v1.size()/_k][0];
++        v3[i] = _v3[i*_v1.size()/_k][0];
++        r1[i] = _r1[i*_v1.size()/_k][0];
++        r2[i] = _r2[i*_v1.size()/_k][0];
++    }
++    for(int i = 0; i < k; i++){
++        beta2[i] = beta2[i]*beta1[0];
++    }
++    /*
++    fft(v1,(int)log2(v1.size()),true);
++    fft(v2,(int)log2(v2.size()),true);
++    fft(r1,(int)log2(r1.size()),true);
++    fft(r2,(int)log2(r2.size()),true);
++    v1.resize(_k);
++    v2.resize(_k);
++    r1.resize(_k);
++    r2.resize(_k);
++    */
++    int rounds = (int)log2(k);
++    vector<F> challenges(rounds);
++    clock_t t1 = clock();
++    for(int i = 0; i < rounds; i++){
++        quadratic_poly p = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
++        quadratic_poly p_r = quadratic_poly(F_ZERO,F_ZERO,F_ZERO);
++        linear_poly _p = linear_poly(F_ZERO,F_ZERO);
++        cubic_poly poly = cubic_poly(F_ZERO,F_ZERO,F_ZERO,F_ZERO);
++        linear_poly l1,l2;
++        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
++            l1 = linear_poly(v1[2*j+1]-v1[2*j],v1[2*j]);
++            l2 = linear_poly(v2[2*j+1]-v2[2*j],v2[2*j]);
++            p = l1*l2;
++            l1 = linear_poly(r1[2*j+1]-r1[2*j],r1[2*j]);
++            l2 = linear_poly(r2[2*j+1]-r2[2*j],r2[2*j]);
++            p_r = l1*l2;
++            _p = linear_poly(v3[2*j+1]-v3[2*j],v3[2*j]);
++            p.a = p.a + b*p_r.a;p.b = p.b + b*p_r.b - _p.a;p.c = p.c + b*p_r.c-_p.b;
++            poly = poly + p* linear_poly(beta2[2*j+1]-beta2[2*j],beta2[2*j]);
++        }
++        clock_t tv1 = clock();
++        if(poly.eval(0) + poly.eval(1) != y){
++            printf("Error in sumcheck functionality %d\n",i);
++            exit(-1);
++        }
++        ps += 4*sizeof(F)/1024.0;
++
++        challenges[i] = rand();
++        y = poly.eval(challenges[i]);
++        clock_t tv2 = clock();
++        vt += (double)(tv2-tv1)/(double)CLOCKS_PER_SEC;
++        for(int j = 0; j < v1.size()/(1<<(i+1)); j++){
++            v1[j] = challenges[i]*(v1[2*j+1]-v1[2*j]) + v1[2*j];
++            v2[j] = challenges[i]*(v2[2*j+1]-v2[2*j]) + v2[2*j];
++            v3[j] = challenges[i]*(v3[2*j+1]-v3[2*j]) + v3[2*j];
++            r1[j] = challenges[i]*(r1[2*j+1]-r1[2*j]) + r1[2*j];
++            r2[j] = challenges[i]*(r2[2*j+1]-r2[2*j]) + r2[2*j];
++            beta2[j] = challenges[i]*(beta2[2*j+1]-beta2[2*j]) + beta2[2*j];
++        }        
++    }
++    clock_t t2 = clock();
++    pt += _v1.size()*(double)(t2-t1)/(double)CLOCKS_PER_SEC;
++    
++    return {{v1[0],v2[0],v3[0],beta2[0],r1[0],r2[0]},challenges};
++}
++
++
++F F_ip_functionality( vector<vector<F>> &R1, vector<vector<F>> &R2 , vector<F> &beta1 ,vector<F> &beta2, int _k, int k){
++    vector<F> y_vectors(R1.size(),0);
++    F y = F(0);
++    for(int i = 0; i < R1.size(); i++){
++        if(beta1.size()){
++            for(int j = 0; j < R1[i].size(); j++){
++                y_vectors[i] += beta1[j]*R1[i][j]*R2[i][j];
++            }
++        }else{
++            for(int j = 0; j < R1[i].size(); j++){
++                y_vectors[i] += R1[i][j]*R2[i][j];
++            }
++        }
++    }
++    //fft(y_vectors,(int)log2(y_vectors.size()),true);
++    //y_vectors.resize(_k);fft(y_vectors,(int)log2(_k),false);
++    if(beta2.size()){
++        for(int i = 0; i < k; i++){
++            y += beta2[i]*y_vectors[i*R1.size()/_k];
++        }
++    }else{
++        for(int i = 0; i < k; i++){
++            y += y_vectors[i*R1.size()/_k];
++        }
++    }
++    return y;
++}
++
++F F_ip_functionality2( vector<vector<F>> &R1, vector<vector<F>> &R2, vector<vector<F>> &R3, vector<F> &beta1 ,vector<F> &beta2, int _k, int k){
++    vector<F> y_vectors(R1.size(),0);
++    F y = F(0);
++    for(int i = 0; i < R1.size(); i++){
++        if(beta1.size()){
++            for(int j = 0; j < R1[i].size(); j++){
++                y_vectors[i] += beta1[j]*(R1[i][j]*R2[i][j]-R3[i][j]);
++            }
++        }else{
++            for(int j = 0; j < R1[i].size(); j++){
++                y_vectors[i] += R1[i][j]*R2[i][j] - R3[i][j]; 
++            }
++        }
++    }
++    //fft(y_vectors,(int)log2(y_vectors.size()),true);
++    //y_vectors.resize(_k);fft(y_vectors,(int)log2(_k),false);
++    if(beta2.size()){
++        for(int i = 0; i < k; i++){
++            y += beta2[i]*y_vectors[i*R1.size()/_k];
++        }
++    }else{
++        for(int i = 0; i < k; i++){
++            y += y_vectors[i*R1.size()/_k];
++        }
++    }
++    return y;
++}
++
++F F_eval_functionality( vector<vector<F>> &R, vector<F> &beta1 ,vector<F> &beta2, int _k){
++    vector<F> y_vectors(R.size(),0);
++    F y = F(0);
++    for(int i = 0; i < R.size(); i++){
++        if(beta1.size()){
++            for(int j = 0; j < R[i].size(); j++){
++                y_vectors[i] += beta1[j]*R[i][j];
++            }
++        }else{
++            for(int j = 0; j < R[i].size(); j++){
++                y_vectors[i] += R[i][j];
++            }
++        }
++    }
++    fft(y_vectors,(int)log2(y_vectors.size()),true);
++    y_vectors.resize(_k);fft(y_vectors,(int)log2(_k),false);
++    if(beta2.size()){
++        for(int i = 0; i < _k; i++){
++            y += beta2[i]*y_vectors[i];
++        }
++    }else{
++        for(int i = 0; i < _k; i++){
++            y += y_vectors[i];
++        }
++    }
++    return y;
++}
++
++vector<int> convert2vector(vector<vector<int>> &M){
++    vector<int> V;
++    for(int i = 0; i < M.size(); i++){
++        for(int j = 0; j < M[i].size(); j++){
++            V.push_back(M[i][j]);
++        }
++    }
++    return V;
++}
++
++vector<F> convert2vector(vector<vector<F>> M){
++    vector<F> V;
++    for(int i = 0; i < M.size(); i++){
++        for(int j = 0; j < M[i].size(); j++){
++            V.push_back(M[i][j]);
++        }
++    }
++    return V;
++}
++
++vector<F> tensor2vector(vector<vector<vector<vector<F>>>> M){
++    vector<F> V;
++
++    for(int i = 0; i < M.size(); i++){
++        for(int j = 0; j < M[i].size(); j++){
++            for(int k = 0; k < M[i][j].size(); k++){
++                for(int l = 0; l < M[i][j][k].size(); l++){
++                    V.push_back(M[i][j][k][l]);
++                }
++            }
++        }
++    }
++    return V;
++}
++
++
++vector<vector<vector<vector<F>>>> vector2tensor(vector<F> v,vector<vector<vector<vector<F>>>> M,int w_pad){
++    int N = M[0].size();
++    int w = M[0][0].size();
++    vector<vector<vector<vector<F>>>> M_new(M.size());
++    for(int i = 0; i < M.size(); i++){
++        M_new[i].resize(M[i].size());
++        for(int j = 0; j < M[i].size(); j++){
++            M_new[i][j].resize(w_pad);
++            for(int k = 0; k < w_pad; k++){
++                M_new[i][j][k].resize(w_pad);
++                for(int l = 0; l < w_pad; l++){
++                    M_new[i][j][k][l] = v[i*N*w*w + j*w*w + k*w + l];
++                    //V.push_back(M[i][j][k][l]);
++                }
++            }
++        }
++    }
++    return M_new;
++}
++
++vector<vector<F>> convert2matrix(vector<F> arr, int d1, int d2){
++    vector<vector<F>> U(d1);
++    for(int i = 0; i < d1; i++){
++        U[i].resize(d2);
++        for(int j = 0; j < d2; j++){
++            U[i][j] = arr[i*d2+j];
++        }
++    }
++    return U;
++}
++
++
++vector<vector<F>> transpose(vector<vector<F>> M){
++    vector<vector<F>> M_t(M[0].size());
++    for(int i = 0; i < M[0].size(); i++){
++        M_t[i].resize(M.size());
++        for(int j = 0; j < M.size(); j++){
++            M_t[i][j] = M[j][i];
++        }
++    }
++    return M_t;
++}
++
++vector<vector<F>> rotate(vector<vector<F>> M){
++    vector<vector<F>> M_r(M.size());
++    for(int i = 0; i < M.size(); i++){
++        M_r[i].resize(M[i].size());
++        for(int j = 0; j < M[i].size(); j++){
++            M_r[i][j] = M[M.size()-1-i][M[i].size()-1-j];
++        }
++    }
++    return M_r;
++}
++
++
++
++F getRootOfUnity(int n) {
++     F rou;
++      rou.img = 1033321771269002680L;
++        rou.real = 2147483648L;
++
++        assert(n <= 61);
++
++        for(int i = 0; i < 62 - n; ++i)
++            rou = rou * rou;
++
++    return rou;
++}
++
++
++
++void fft(vector<F> &arr, int logn, bool flag) {
++//    cerr << "fft: " << endl;
++//    for (auto x: arr) cerr << x << ' ';
++//    cerr << endl;
++    std::vector<u32> rev;
++    std::vector<F> w;
++
++    u32 len = 1ULL << logn;
++    assert(arr.size() == len);
++
++    rev.resize(len);
++    w.resize(len);
++
++    rev[0] = 0;
++    for (u32 i = 1; i < len; ++i)
++        rev[i] = rev[i >> 1] >> 1 | (i & 1) << (logn - 1);
++
++    w[0] = F_ONE;
++
++    // Get root of unity
++    F rou = getRootOfUnity(logn);
++    
++    //assert(log_order <= 61);
++
++    //for (int i = 0; i < 62 - logn; ++i)
++    //    rou = rou * rou;
++
++    w[1] = rou;
++    
++    
++    
++    
++    if (flag) w[1] = w[1].inv();
++    for (u32 i = 2; i < len; ++i) w[i] = w[i - 1] * w[1];
++    for (u32 i = 0; i < len; ++i)
++        if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
++
++    
++    F u,v;
++    for (u32 i = 2; i <= len; i <<= 1)
++        for (u32 j = 0; j < len; j += i)
++            for (u32 k = 0; k < (i >> 1); ++k) {
++                u = arr[j + k];
++                v = arr[j + k + (i >> 1)] * w[len / i * k];
++                arr[j + k] = u + v;
++                arr[j + k + (i >> 1)] = u - v;
++            }
++
++    if (flag) {
++        F ilen;
++        ilen = F(len).inv();
++        if(ilen*len != 1){
++            printf("Error in inv\n");
++            exit(-1);
++        }
++        for (u32 i = 0; i < len; ++i){
++            arr[i] = arr[i] * ilen;
++            mul_counter++;
++        }
++    }
++}
++
++void __fft(F *&arr,  int logn, bool flag){
++     std::vector<u32> rev;
++    //std::vector<F> w;
++  
++    u32 len = 1ULL << logn;
++    //assert(arr.size() == len);
++    F rou = getRootOfUnity(logn);
++    
++    rev.resize(len);
++    //w.resize(len);
++
++    rev[0] = 0;
++    for (u32 i = 1; i < len; ++i)
++        rev[i] = rev[i >> 1] >> 1 | (i & 1) << (logn - 1);
++
++    
++    // Get root of unity
++    
++    //assert(log_order <= 61);
++
++    //for (int i = 0; i < 62 - logn; ++i)
++    //    rou = rou * rou;
++
++    
++    
++    
++    for (u32 i = 0; i < len; ++i)
++        if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
++   
++     
++    F *_w = new F[len];
++        _w[0] = F_ONE;
++        _w[1] = rou;
++        if (flag) _w[1] = _w[1].inv();
++        for (u32 i = 2; i < len; ++i) _w[i] = _w[i - 1] * _w[1];
++    /*
++    if(w.size() != len){
++        printf("Initializing %d\n",len);
++        w.clear();
++        w.resize(len);
++        w[0] = F_ONE;
++        w[1] = rou;
++        if (flag) w[1] = w[1].inv();
++        for (u32 i = 2; i < len; ++i) w[i] = w[i - 1] * w[1];
++    }
++    */
++    
++    F u,v;
++    for (u32 i = 2; i <= len; i <<= 1)
++        for (u32 j = 0; j < len; j += i)
++            for (u32 k = 0; k < (i >> 1); ++k) {
++                u = arr[j + k];
++                v = arr[j + k + (i >> 1)] * _w[len / i * k];
++                arr[j + k] = u + v;
++                arr[j + k + (i >> 1)] = u - v;
++            }
++
++    delete[] _w;
++   
++    
++    if (flag) {
++        F ilen;
++        ilen = F(len).inv();
++        if(ilen*len != 1){
++            printf("Error in inv\n");
++            exit(-1);
++        }
++        for (u32 i = 0; i < len; ++i){
++            arr[i] = arr[i] * ilen;
++            mul_counter++;
++        }
++    }
++    
++    
++}
++
++void _fft(F *arr, int logn, bool flag) {
++//    cerr << "fft: " << endl;
++//    for (auto x: arr) cerr << x << ' ';
++//    cerr << endl;
++   
++    std::vector<u32> rev;
++    //std::vector<F> w;
++
++    u32 len = 1ULL << logn;
++    //assert(arr.size() == len);
++    F rou = getRootOfUnity(logn);
++    
++    rev.resize(len);
++    //w.resize(len);
++
++    rev[0] = 0;
++    for (u32 i = 1; i < len; ++i)
++        rev[i] = rev[i >> 1] >> 1 | (i & 1) << (logn - 1);
++
++    
++    // Get root of unity
++    
++    //assert(log_order <= 61);
++
++    //for (int i = 0; i < 62 - logn; ++i)
++    //    rou = rou * rou;
++
++    
++    
++    
++   
++    
++    
++    for (u32 i = 0; i < len; ++i)
++        if (rev[i] < i) std::swap(arr[i], arr[rev[i]]);
++    
++     if(w.size() != len){
++        //printf("Initializing\n");
++        w.clear();
++        w.resize(len);
++        w[0] = F_ONE;
++        w[1] = rou;
++        if (flag) w[1] = w[1].inv();
++        for (u32 i = 2; i < len; ++i) w[i] = w[i - 1] * w[1];
++    }
++    F u,v;
++    for (u32 i = 2; i <= len; i <<= 1)
++        for (u32 j = 0; j < len; j += i)
++            for (u32 k = 0; k < (i >> 1); ++k) {
++                u = arr[j + k];
++                v = arr[j + k + (i >> 1)] * w[len / i * k];
++                arr[j + k] = u + v;
++                arr[j + k + (i >> 1)] = u - v;
++            }
++
++    
++    if (flag) {
++        F ilen;
++        ilen = F(len).inv();
++        if(ilen*len != 1){
++            printf("Error in inv\n");
++            exit(-1);
++        }
++        for (u32 i = 0; i < len; ++i){
++            arr[i] = arr[i] * ilen;
++            mul_counter++;
++        }
++    }
++}
++
++
++
++void phiPowInit(vector<F> &phi_mul, int n, bool isIFFT) {
++    u32 N = 1ULL << n;
++    F rou = getRootOfUnity(n);
++
++    /*
++    rou.img = 1033321771269002680L;
++    rou.real = 2147483648L;
++    for (int i = 0; i < 62 - n; ++i)
++        rou = rou * rou;
++    */
++    
++    F phi = rou;
++    if (isIFFT) phi = phi.inv();
++    phi_mul[0] = F_ONE;
++    for (u32 i = 1; i < N; ++i) phi_mul[i] = phi_mul[i - 1] * phi;
++}
++
++void phiGInit(vector<F> &phi_g, const vector<F>::const_iterator &rx, const F &scale, int n, bool isIFFT) {
++    vector<F> phi_mul(1 << n);
++    phiPowInit(phi_mul, n, isIFFT);
++
++    if (isIFFT) {
++//        cerr << "==" << endl;
++//        cerr << "gLength: " << n << endl;
++//        for (int i = 0; i < n - 1; ++i) {
++//            cerr << rx[i];
++//            cerr << endl;
++//        }
++        phi_g[0] = phi_g[1] = scale;
++        for (int i = 1; i <= n; ++i)
++            for (u32 b = 0; b < (1ULL << (i - 1)); ++b) {
++                u32 l = b, r = b ^ (1ULL << (i - 1));
++                int m = n - i;
++                F tmp1 = F_ONE - rx[m], tmp2 = rx[m] * phi_mul[b << m];
++                phi_g[r] = phi_g[l] * (tmp1 - tmp2);
++                phi_g[l] = phi_g[l] * (tmp1 + tmp2);
++            }
++
++
++        
++    } else {
++//        cerr << "==" << endl;
++//        cerr << "gLength: " << n << endl;
++//        for (int i = 0; i < n; ++i) {
++//            cerr << rx[i];
++//            cerr << endl;
++//        }
++        phi_g[0] = scale;
++        /*
++        
++        for(int i = 0; i < n; i++){
++            for(int j = 1ULL << (i+1)-1; j >= 0; j--){
++                phi_g[j] = phi_g[j%(1ULL << i)]*(F(1)-rx[i] + rx[i]*phi_mul[j]);
++            }
++        }
++        */
++
++        for (int i = 1; i < n; ++i){
++            for (u32 b = 0; b < (1ULL << (i - 1)); ++b) {
++                u32 l = b, r = b ^ (1ULL << (i - 1));
++                int m = n - i;
++                
++                F tmp1 = F_ONE - rx[m], tmp2 = rx[m] * phi_mul[b << m];
++                //printf("%d,%d\n",r,l );
++                phi_g[r] = phi_g[l] * (tmp1 - tmp2);
++                phi_g[l] = phi_g[l] * (tmp1 + tmp2);
++            }
++
++        }
++        for (u32 b = 0; b < (1ULL << (n - 1)); ++b) {
++            u32 l = b;
++
++            F tmp1 = F_ONE - rx[0], tmp2 = rx[0] * phi_mul[b];
++            phi_g[l] = phi_g[l] * (tmp1 + tmp2);
++            
++        }
++        
++    }
++}
++
++
++vector<F> prepare_matrix(vector<vector<F>> M, vector<F> r){
++    vector<F> V;
++    int n = M.size();
++    int offset = M[0].size()/2;
++    //printf(">> %d,%d,%d\n",n, M[0].size(),r.size() );
++    for(int k = 0; k < r.size(); k++){
++        for(int i = 0; i < n; i++){
++            for(int j = 0; j < offset; j++){
++                M[i][j] = M[i][2*j] + r[k]*(M[i][2*j+1]-M[i][2*j]);
++            }
++        }
++        offset = offset/2;
++    }
++    for(int i = 0; i < n; i++){
++        V.push_back(M[i][0]);
++    }
++    return V;
++}
++
++F evaluate_matrix(vector<vector<F>> M, vector<F> r1, vector<F> r2){
++    vector<F> v = prepare_matrix(transpose(M),r1);
++    for(int i = 0; i < r2.size(); i++){
++        int L = 1 << (r2.size() - 1 - i);
++
++        for(int j = 0; j < L; j++){
++            v[j] = (F(1)-r2[i])*v[2*j] + r2[i]*v[2*j+1];
++        }
++    }
++    return v[0];
++}
++
++F evaluate_vector(vector<F> v,vector<F> r){
++    vector<F> _r;
++    for(int i = 0; i < (int)log2(v.size()); i++){
++        _r.push_back(r[i]);
++    }
++    r = _r;
++    for(int i = 0; i < r.size(); i++){
++        int L = 1 << (r.size() - 1 - i);
++        for(int j = 0; j < L; j++){
++            v[j] = (F(1)-r[i])*v[2*j] + r[i]*v[2*j+1];
++        }
++    }
++    return v[0];    
++}
++
++
++
++
++vector<vector<F>> generate_tables(){
++    int N = 4;
++    int no_tables = 5;
++    vector<vector<F>> tables(no_tables);
++    vector<int> max_num;
++    int exponent = 0,last_exponent = 1;
++    float num = 0;
++    
++    for(int i = 0; i < tables.size(); i++){
++        for(int j = 0; j < 1<<N; j++){
++            exponent = exponent + last_exponent; 
++            F num;
++            num = random();//.setByCSPRNG();
++            tables[i].push_back(num);
++            //tables[i].push_back(quantize(exp(-dequantize(exponent,1))));
++        }
++        last_exponent = exponent;
++        exponent = 0;
++    }
++    
++    //printf("%f,%f\n",dequantize(prod,level),exp(-0.1) );
++    return tables;
++}
++
++
++vector<F> get_predicates(int size){
++    vector<F> poly;
++    for(int i = 0; i < 1<<size; i++){
++        poly.push_back(F(rand()%2));
++    }
++    return poly;
++}
++
++vector<vector<F>> get_poly(int size){
++    vector<vector<F>> poly(1<<size);
++
++    for(int i = 0; i < 1<<size; i++){
++        poly[i].resize(1);
++        poly[i][0] = F(rand()%1024);
++    }
++    return poly;
++}
++void get_int64(vector<unsigned long long int> &arr, __hhash_digest hash){
++    unsigned long long int* res_array = reinterpret_cast<unsigned long long int*>(&hash.h0);
++    for (int i = 0; i < 2; ++i) {
++        arr[i] = res_array[i];
++    }
++    res_array = reinterpret_cast<unsigned long long int*>(&hash.h1);
++    for(int i = 2; i < 4; i++){
++        arr[i] = res_array[i-2];        
++    }
++}
++
++void get_field_vector(vector<F> &h_f, vector<__hhash_digest> &h){
++    F pow1 = F(1);
++    F pow2 = F(1ULL<<32)*F(1ULL<<32);
++    F pow3 = pow2*pow2;
++    F pow4 = pow3*pow3;
++    vector<unsigned long long int> arr(4);
++    for(int i = 0; i < h_f.size(); i++){
++        get_int64(arr,h[i]);
++        h_f[i] = F(arr[0]) + pow2*arr[1] + pow3*arr[2]+pow4*arr[3];
++    }
++    
++}
++
++vector<F> generate_randomness(int size){
++    vector<F> x;
++    F c;
++    for(int i = 0; i < size; i++){
++        if(i % 100 == 0){
++            c = random();
++        }
++        x.push_back(c + F(rand()));
++    }
++    return x;
++}
++void compute_binary(vector<F> r, vector<F> &B){
++    B.resize(1<<r.size());
++    int num;
++    for(int i = 0; i < 1<<r.size(); i++){
++        num = i;
++        B[i] = F(1);
++        for(int j = 0; j < r.size(); j++){
++            if(num & 1 == 1){
++                B[i] = B[i]*r[j];
++            }
++            //else{
++            //    B[i] = B[i]*(F(1)-r[j]);
++            //}
++            num = num >> 1;
++        }
++
++    }
++}
++
++vector<F> convert_to_field(vector<int> &arr){
++    vector<F> buff(arr.size());
++    for(int i  =0 ; i < arr.size(); i++){
++        buff[i] = F(arr[i]);
++    }
++    return buff;
++}
++
++F _beta(int idx, vector<F> r){
++    F mul = F(1);
++    for(int i = 0; i < r.size(); i++){
++        if(idx & 1 == 1){
++            mul *= r[i];
++        }
++        else{
++            mul *= (F(1)-r[i]);
++        }
++        idx = idx>>1;
++    }
++    return mul;
++}
++
++F beta_identity(vector<F> r1, vector<F> r2){
++    F eval = F(1);
++    for(int i = 0; i < r1.size(); i++){
++        eval *= ((F(1)-r1[i])*(F(1)-r2[i])  + r1[i]*r2[i]);
++    }
++    return eval;
++}
++
++F get_offset_product(int size,int pos,vector<F> r){
++    vector<F> bits;
++    F prod = F(1);
++    for(int i = 0; i < r.size(); i++){
++        if(pos & 1){
++            bits.push_back(F(1));
++        }else{
++            bits.push_back(F(0));
++        }
++        pos = pos >> 1;
++    }
++    for(int i = 0; i < r.size()-(int)log2(size); i++){
++        prod *= (bits[r.size()-1-i]*r[r.size()-1-i]+ (F(1)-bits[r.size()-1-i])*(F(1) - r[r.size()-1-i]));
++    }
++    return prod;
++}
++
++
++void prepare_witness_data(size_t size, vector<F> &witness, vector<F> &vL, vector<F> &vR, vector<F> &vO, int type){
++    if(nand_active()){ nand_witness(witness,vL,vR,vO); return; }
++    if(type == 0){
++        witness.resize(2*size,0);
++        vL.resize(size,0);
++        vR.resize(size,0);
++        vO.resize(size,0);
++        for(int i = 0; i < size; i++){
++            witness[i] = random();
++        }
++        
++        int n = size;
++        int m = 0;
++        for(int j = 0; j < (int)log2(size); j++){
++            for(int i = 0; i < size/(1<<(j+1)); i++){
++                if(n+i >= 2*size){
++                    printf("Error\n");
++                    exit(-1);
++                }
++                witness[n+i] =  witness[2*i + m]*witness[2*i+m + 1];            
++            }
++            m += size/(1<<j);
++            n += size/(1<<(j+1));
++        }
++        for(int i = 0; i < size-1; i++){
++            
++            vL[i] = witness[A[i][0].first];
++            vR[i] = witness[B[i][0].first];
++            vO[i] = witness[C[i][0].first];
++        }
++        
++        for(int i = 0; i < vO.size(); i++){
++            if(vL[i]*vR[i] != vO[i]){
++                printf("Error\n");
++                exit(-1);
++            }
++        }
++    }else{
++        witness = generate_randomness(size/16);
++        for(int i = size/16; i < A.size(); i++){
++            if(A[i].size() == 0) continue;
++            F new_wire = 0;
++            for(int j = 0; j < A[i].size(); j++){
++                new_wire += witness[A[i][j].first];
++            }
++            vL.push_back(new_wire);
++            new_wire *= witness[B[i][0].first];
++            vR.push_back(witness[B[i][0].first]);
++            witness.push_back(new_wire);
++            vO.push_back(new_wire);
++        }
++        for(int i = 0; i < vL.size(); i++){
++            if(vL[i]*vR[i] != vO[i]){
++                printf("Error in proving data consistency\n");
++                exit(-1);
++            }
++        }
++        
++        witness.resize(next_pow2(witness.size()),F(0));
++        vL.resize(next_pow2(vL.size()),F(0));
++        vR.resize(next_pow2(vR.size()),F(0));
++        vO.resize(next_pow2(vO.size()),F(0));
++    }
++    
++}
++
++
++
++F sequence_eval(int size, vector<F> r1, vector<F> r2){
++    vector<F> r; 
++    
++    for(int i = 0; i < (int)log2(size)-r2.size(); i++) r.push_back(r1[i]);
++    for(int i = 0; i < r2.size(); i++) r.push_back(r2[i]); 
++    F sum = F(0);
++    for(int i = 0; i < (int)log2(size); i++){
++        sum += r[(int)log2(size)-1-i]*F(size/(1<<(i+1)));
++    }
++    return sum;
++}
++
++F betas_eval(int size, vector<F> r11, vector<F> r12, vector<F> r21, vector<F> r22){
++    F prod = F(1);
++    //reverse(r12.begin(),r12.end());
++    //printf("%d,%d,%d\n",r11.size(),r12.size(), (int)log2(size));
++    for(int i = 0; i < r12.size(); i++){
++        prod *= (r12[i]*r22[i] + (F(1) - r12[i])*(F(1)- r22[i]));
++    }
++    for(int i = 0; i < r11.size(); i++){
++        prod *= (r11[i]*r21[i] + (F(1) - r11[i])*(F(1)- r21[i]));
++    }
++    return prod;
++}
++
++F sparrow_V_check(vector<F> poly, int degree){
++    F sum = F(0);
++    if(degree <= 16){
++        for(int i = poly.size()-degree; i < poly.size(); i++) sum += poly[i];
++        
++    }else{
++        for(int i = 0; i < degree; i++) sum += poly[2*i];
++    }
++    
++    return sum;
++}
++
++F evaluate_poly_extended(vector<F> poly, vector<F> poly_sum, F r, int c){
++	F sum = F(0);
++	int idx = 0;
++	if(c <= 4){
++        vector<F> L = compute_lagrange_coeff(getRootOfUnity(c),r,1ULL<<(c));
++	    for(int i = 0; i < (1<<c); i++){
++            for(int j = i+1; j < (1<<c); j++){
++                sum += L[i]*L[j]*poly[idx];
++                idx++;
++            }
++        }
++        for(int i = 0; i < (1<<c); i++){
++            sum += L[i]*L[i]*poly[idx];
++            if(poly_sum.size()) sum += L[i]*poly_sum[i];
++            idx++;
++        }
++    }else{
++        vector<F> L = compute_lagrange_coeff(getRootOfUnity(c+1),r,1ULL<<(c+1));
++	    for(int i = 0; i < L.size(); i++){
++            sum +=  poly[i]*L[i];
++        }
++    }
++    
++	
++    return sum;
+ }
+\ No newline at end of file

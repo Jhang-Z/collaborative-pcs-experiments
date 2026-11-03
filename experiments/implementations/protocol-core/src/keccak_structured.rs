@@ -41,7 +41,7 @@ fn validate_parameters(n: usize, groups: usize, gamma: usize, tau: usize) -> Res
         return Err("unsupported structured Keccak party/group count".into());
     }
     let batch = groups * (n / 4); // bounded before multiplication and allocation
-    let formal = gamma == 871 && tau == 4 && (8..=MAX_INSTANCES).contains(&batch);
+    let formal = matches!(gamma,520|871) && tau == 4 && (8..=MAX_INSTANCES).contains(&batch);
     let development = n == 8 && groups == 1 && gamma == 16 && tau == 3;
     if !formal && !development {
         return Err("unsupported structured Keccak parameters: use the formal configuration or N8/B2/gamma16/tau3 development configuration".into());
@@ -163,6 +163,11 @@ pub fn verify(key: &VerifierKey, digests: &[[u8; 32]], proof: &Proof) -> Result<
   }
   assert!(validate_parameters(32,512,16,3).is_err());
   assert!(validate_parameters(8,1,16,3).is_ok());
+ }
+ #[test] fn gamma520_structured_keys_are_distinct_and_roundtrip() {
+  let k=VerifierKey::new(16,2,520,4).unwrap();let old=VerifierKey::new(16,2,871,4).unwrap();
+  let bytes=encode_key(&k);assert_eq!(encode_key(&decode_key(&bytes).unwrap()),bytes);
+  assert_ne!(bytes,encode_key(&old));assert_ne!(k.config().pcs.layout.pad,old.config().pcs.layout.pad);
  }
  #[test] fn canonical_keccak_key_rejects_sha_and_binds_output_relation() {
   let k=VerifierKey::new(8,1,16,3).unwrap();let bytes=encode_key(&k);

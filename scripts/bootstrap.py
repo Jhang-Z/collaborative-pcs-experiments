@@ -20,7 +20,7 @@ import tempfile
 import urllib.request
 
 
-KINDS = {'ours-app', 'ours-pcs', 'native-baseline', 'native-pcs', 'native-keccak'}
+KINDS = {'ours-app', 'ours-pcs', 'native-baseline', 'native-pcs', 'native-keccak', 'native-general', 'ours-general', 'binius-general'}
 BENCH = Path('experiments/benchmarks-2026-10-23')
 
 
@@ -332,6 +332,14 @@ def pappas_source(root, vendor, kind, destination):
     if destination.exists():
         raise RuntimeError('Pappas source staging requires a fresh destination')
     shutil.copytree(vendor, destination, ignore=shutil.ignore_patterns('.git', 'build', 'CMakeFiles', '*.o', 'fft_gkr'))
+    if kind == 'native-general':
+        with (root / 'third_party/pappas-general.patch').open() as patch:
+            subprocess.run(['git', 'apply', '--no-index', '--whitespace=nowarn', '-p1', '-'], cwd=destination, stdin=patch, check=True)
+        expected = json.loads((root / 'third_party/pappas-general-files.json').read_text())
+        for name, digest in expected.items():
+            if sha(destination / name) != digest:
+                raise RuntimeError('General Pappas source mismatch: ' + name)
+        return files_manifest(destination)
     adapter = root / BENCH / 'baseline-pappas/adapter'
     src = destination / 'src'
     shutil.copy2(adapter / 'parameters.hpp', src / 'parameters.hpp')
@@ -411,11 +419,13 @@ def prepare(root: Path, kinds: set[str], install: bool = True) -> dict:
     root = Path(root).resolve()
     if not kinds or not kinds <= KINDS:
         raise ValueError('Unknown or empty implementation selection')
+    if 'native-general' in kinds and kinds & {'native-pcs', 'native-keccak'}:
+        raise ValueError('Run the general and legacy MPI campaigns separately')
     inspection = inspect_environment(root)
     capabilities = inspection['capabilities']
     if not capabilities['linux_x86_64'] or not capabilities['python_supported']:
         raise RuntimeError('The selected implementations require Linux x86_64 and Python >=3.10.')
-    if kinds & {'native-pcs', 'native-keccak'}:
+    if kinds & {'native-pcs', 'native-keccak', 'native-general'}:
         if not capabilities['pappas_avx2']:
             raise RuntimeError('The selected Pappas implementation requires AVX2 (SHA-NI is not required).')
         if not capabilities['mpi_separate_progress_cpu']:
@@ -454,7 +464,7 @@ def prepare(root: Path, kinds: set[str], install: bool = True) -> dict:
         versions = {'cc': tool(cc), 'cxx': tool(cxx), 'python': platform.python_version()}
         runtime = {'binaries': {}, 'python': sys.executable, 'versions': versions,
                    'inspection': inspection, 'build_jobs': jobs, 'dependencies': {}, 'builds': {}}
-        rust_kinds = kinds & {'ours-app', 'ours-pcs', 'native-baseline'}
+        rust_kinds = kinds & {'ours-app', 'ours-pcs', 'native-baseline', 'ours-general', 'binius-general'}
         if rust_kinds:
             cargo, rustc = rust_tools(root, config, install, log)
             versions.update(cargo=tool(cargo), rustc=tool(rustc))
@@ -463,7 +473,9 @@ def prepare(root: Path, kinds: set[str], install: bool = True) -> dict:
             for kind, directory, binary in [
                 ('ours-app', 'collaborative-snark', 'ours-fullnet'),
                 ('ours-pcs', 'collaborative-pcs', 'ours-pcs'),
-                ('native-baseline', 'keccak-native', 'binius64-keccak-zk-bench')]:
+                ('native-baseline', 'keccak-native', 'binius64-keccak-zk-bench'),
+                ('ours-general', 'collaborative-snark', 'ours-fullnet'),
+                ('binius-general', 'binius-general', 'binius64-general-zk-bench')]:
                 if kind not in kinds:
                     continue
                 source = root / BENCH / directory
@@ -482,7 +494,7 @@ def prepare(root: Path, kinds: set[str], install: bool = True) -> dict:
                 runtime['builds'][kind] = {'identity': identity, 'source_files': source_hashes,
                     'shared_core_source_sha256': hashlib.sha256(json.dumps(core, sort_keys=True).encode()).hexdigest(),
                     'binary_sha256': sha(executable), 'rustflags': environment['RUSTFLAGS'], 'locked': True}
-        native_kinds = kinds & {'native-pcs', 'native-keccak'}
+        native_kinds = kinds & {'native-pcs', 'native-keccak', 'native-general'}
         if native_kinds:
             cmake = cmake_tool(root, config, install)
             mpirun, mpicxx = mpi_tools(root, config, install, cc, cxx, jobs, log)
@@ -494,7 +506,8 @@ def prepare(root: Path, kinds: set[str], install: bool = True) -> dict:
                 with tempfile.TemporaryDirectory(prefix='source-check-', dir=build) as temporary:
                     source = Path(temporary) / 'source'
                     manifest = pappas_source(root, vendor, kind, source)
-                    checks = config['formal_source_hashes'][kind]
+                    checks = (json.loads((root / 'third_party/pappas-general-files.json').read_text())
+                              if kind == 'native-general' else config['formal_source_hashes'][kind])
                     for name, expected in checks.items():
                         if manifest[name] != expected:
                             raise RuntimeError(f'Pappas transformation differs from the measured source: {kind}/{name}')
@@ -521,13 +534,14 @@ def prepare(root: Path, kinds: set[str], install: bool = True) -> dict:
                     'ram_stream_prepare': kind == 'native-keccak',
                     'xkcp': {'scope': 'precompiled archive supplied by the fixed Pappas commit; not rebuilt from source',
                              'sha256': sha(staged / 'lib/libXKCP.a')}}
-            library_id = hashlib.sha256((sha(root / 'scripts/mpi_trace.cpp') + json.dumps(versions, sort_keys=True)).encode()).hexdigest()
+            tracer = root / ('scripts/general/mpi_trace_memory.cpp' if 'native-general' in kinds else 'scripts/mpi_trace.cpp')
+            library_id = hashlib.sha256((sha(tracer) + json.dumps(versions, sort_keys=True)).encode()).hexdigest()
             library = build / 'cache' / library_id / 'mpi-trace.so'
             library_record = library.with_suffix('.json')
             if (not library.exists() or not library_record.exists()
                     or json.loads(library_record.read_text()).get('binary_sha256') != sha(library)):
                 library.parent.mkdir(parents=True, exist_ok=True)
-                run([mpicxx, '-std=c++17', '-O2', '-fPIC', '-shared', root / 'scripts/mpi_trace.cpp',
+                run([mpicxx, '-std=c++17', '-O2', '-fPIC', '-shared', tracer,
                      '-o', library, '-pthread'], log, environment)
                 save(library_record, {'identity': library_id, 'binary_sha256': sha(library)})
             runtime['mpi_library'] = str(library)

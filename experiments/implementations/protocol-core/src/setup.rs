@@ -52,10 +52,15 @@ impl Setup {
 
  /// Verifier-only construction: no full row NTT, ownership list, or bit-address table.
  pub fn verifier(params:Params)->Self {
+  Self::verifier_mode(params,true)
+ }
+ /// Proof verification never uses the prover's N-by-k sharing coefficient cache.
+ pub fn verifier_compact(params:Params)->Self {Self::verifier_mode(params,false)}
+ fn verifier_mode(params:Params,precompute_lagrange:bool)->Self {
   let layout=Layout::verifier(&params);
   let row=RowCode::compact(params.ell,params.beta);
   let sharing=Sharing::new(params.n_parties);
-  let lagrange=(0..params.n_parties).map(|i|sharing.lagrange(i)).collect();
+  let lagrange=if precompute_lagrange{(0..params.n_parties).map(|i|sharing.lagrange(i)).collect()}else{vec![]};
   let (mask_template,mask_updates)=prepare_mask_plan(&layout);
   Self{params,layout,row,sharing,lagrange,mask_template,mask_updates}
  }

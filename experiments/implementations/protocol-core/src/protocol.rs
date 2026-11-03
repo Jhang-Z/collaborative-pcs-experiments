@@ -479,6 +479,7 @@ pub fn prepare<H: HashSuite>(setup: &Setup, wit: &Witness, seed: u64) -> Prepare
 
 /// Full-entropy v0.4 sharing, independent per-party salt streams and role-scoped trees.
 pub fn prepare_random<H:HashSuite>(setup:&Setup,wit:&Witness,rng:&mut impl Rng,role:u64)->Prepared {
+    let _preparation=crate::execution_trace::pause();
 	let p = &setup.params;
 	let (n, k, np) = (p.n(), p.k(), p.n_parties);
 	let hasher = Hasher::<H>::scoped(role);
@@ -506,6 +507,7 @@ pub fn prepare_random<H:HashSuite>(setup:&Setup,wit:&Witness,rng:&mut impl Rng,r
     if crate::transport::enabled(){let received=crate::transport::values(parties.iter().map(|p|p.row.clone()).collect(),false);for(p,v)in parties.iter_mut().zip(received){p.row=v;}}
 	let client_share = t0.elapsed();
 	// Commitment: encode and hash layer 0.
+    let _online=crate::execution_trace::force_online();
     crate::parallel::parties(&mut parties, |_,party| {
         let t0=Instant::now();let cw=setup.row.encode(&party.row);
         party.time.encode+=t0.elapsed();party.commit_layer(setup,&Hasher::<H>::scoped(role),0,cw);
@@ -738,6 +740,7 @@ pub(crate) fn verify_backend<H:HashSuite>(setup:&Setup,proof:&Proof,tr:&mut Tran
 		return Err("wrong number of query openings".into());
 	}
 	// (a)–(c) per query.
+    let mut encoded_tails:Vec<Option<Vec<L>>>=vec![None;proof.tails.len()];
 	for (a, &(xa, qa)) in queries.iter().enumerate() {
 		let ops = &proof.openings[a];
         if ops.len()!=folds { return Err("malformed query layers".into()); }
@@ -754,7 +757,7 @@ pub(crate) fn verify_backend<H:HashSuite>(setup:&Setup,proof:&Proof,tr:&mut Tran
 			let next = if j + 1 < folds {
 				ops[j + 1].values[qj & 1]
 			} else {
-				setup.row.encode(&proof.tails[xa])[qj]
+				encoded_tails[xa].get_or_insert_with(||setup.row.encode(&proof.tails[xa]))[qj]
 			};
 			if folded != next {
 				return Err(format!("fold consistency failed (query {a}, layer {j})"));

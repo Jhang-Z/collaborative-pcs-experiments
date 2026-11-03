@@ -17,6 +17,8 @@ impl Key {
  pub fn valid(&self)->bool{self.row_bits<usize::BITS as usize&&self.col_bits<usize::BITS as usize&&self.entry_bits>=2&&self.entry_bits<usize::BITS as usize-4&&self.channel_bits==4&&self.entry_bits+4==self.pcs.log&&self.final_pcs.log==self.table_bits()+2&&self.pcs.queries==self.final_pcs.queries&&self.pcs.queries>0}
 }
 pub struct Index {pub key:Key,pub entries:Vec<(usize,usize,usize)>,pub committed:Committed,pub final_committed:Committed,addresses:[Vec<usize>;4]}
+pub struct IndexData {row_bits:usize,col_bits:usize,queries:usize,entries:Vec<(usize,usize,usize)>,addresses:[Vec<usize>;4],values:Vec<L>,finals:Vec<L>}
+impl IndexData {pub fn into_tables(self)->(usize,usize,usize,usize,Vec<L>,Vec<L>){(self.row_bits,self.col_bits,self.queries,self.entries.len().max(4).next_power_of_two(),self.values,self.finals)}}
 #[derive(Clone)]
 pub struct Proof {
  pub auxiliary:public_pcs::Key,pub rounds:Vec<Vec<L>>,pub endpoints:Vec<L>,
@@ -24,31 +26,35 @@ pub struct Proof {
  pub opening:public_pcs::Proof,pub auxiliary_opening:public_pcs::Proof,pub final_opening:public_pcs::Proof,
 }
 impl Proof {pub fn encode(&self)->Vec<u8>{let mut b=self.auxiliary.binding();b.extend((self.rounds.len() as u64).to_le_bytes());for q in &self.rounds{b.extend(bytes(q));}b.extend(bytes(&self.endpoints));b.extend(self.reads.encode());b.extend(self.table.encode());b.extend(bytes(&self.memory_endpoints));b.extend(bytes(&self.final_endpoints));b.extend(self.opening.encode());b.extend(self.auxiliary_opening.encode());b.extend(self.final_opening.encode());b}}
-pub fn index(row_bits:usize,col_bits:usize,entries:Vec<(usize,usize,usize)>,queries:usize)->Index{
+pub fn index_data(row_bits:usize,col_bits:usize,entries:Vec<(usize,usize,usize)>,queries:usize)->IndexData{
  assert!(row_bits<usize::BITS as usize&&col_bits<usize::BITS as usize);
  let mut set=BTreeSet::new();for e in entries{assert!(e.0<3&&e.1<1<<row_bits&&e.2<1<<col_bits);if !set.insert(e){set.remove(&e);}}
  let entries:Vec<_>=set.into_iter().collect();let count=entries.len().max(4).next_power_of_two();let chunks=[row_bits/2,row_bits-row_bits/2,col_bits/2,col_bits-col_bits/2];let table_bits=(*chunks.iter().max().unwrap()).max(2);let b=1<<table_bits;
  let mut values=vec![L::ZERO;16*count];let mut finals=vec![L::ZERO;4*b];let mut addresses:[Vec<usize>;4]=std::array::from_fn(|_|vec![0;count]);
  for(i,&(t,row,col))in entries.iter().enumerate(){addresses[0][i]=row&((1<<chunks[0])-1);addresses[1][i]=row>>chunks[0];addresses[2][i]=col&((1<<chunks[2])-1);addresses[3][i]=col>>chunks[2];values[(12+t)*count+i]=L::ONE;}
  for c in 0..4 {let mut counters=vec![0usize;b];for i in 0..count{let a=addresses[c][i];values[c*count+i]=label(a);values[(4+c)*count+i]=label(counters[a]);counters[a]+=1;values[(8+c)*count+i]=label(counters[a]);}for i in 0..b{finals[c*b+i]=label(counters[i]);}}
+ IndexData{row_bits,col_bits,queries,entries,addresses,values,finals}
+}
+pub fn index(row_bits:usize,col_bits:usize,entries:Vec<(usize,usize,usize)>,queries:usize)->Index{
+ let IndexData{row_bits,col_bits,queries,entries,addresses,values,finals}=index_data(row_bits,col_bits,entries,queries);let count=entries.len().max(4).next_power_of_two();
  let committed=public_pcs::commit(values,queries);let final_committed=public_pcs::commit(finals,queries);let key=Key{row_bits,col_bits,entry_bits:count.trailing_zeros() as usize,channel_bits:4,pcs:committed.key.clone(),final_pcs:final_committed.key.clone()};Index{key,entries,committed,final_committed,addresses}
 }
 impl Index {
  pub fn evaluate(&self,row:&[L],col:&[L],rho:[L;3])->L{self.entries.iter().map(|&(t,i,j)|rho[t]*chi(i,row)*chi(j,col)).sum()}
  pub fn column_weights(&self,row:&[L],rho:[L;3])->Vec<L>{let mut w=vec![L::ZERO;1<<self.key.col_bits];for &(t,i,j) in &self.entries{w[j]+=rho[t]*chi(i,row);}w}
 }
-fn begin(key:&Key,row:&[L],col:&[L],rho:[L;3],value:L,tr:&mut Transcript<'_,H>){tr.absorb(b"memory sparse index v2",&key.binding());tr.absorb(b"sparse row",bytes(row));tr.absorb(b"sparse column",bytes(col));tr.absorb(b"sparse mix/value",bytes(&[rho[0],rho[1],rho[2],value]));}
+pub(crate) fn begin(key:&Key,row:&[L],col:&[L],rho:[L;3],value:L,tr:&mut Transcript<'_,H>){tr.absorb(b"memory sparse index v2",&key.binding());tr.absorb(b"sparse row",bytes(row));tr.absorb(b"sparse column",bytes(col));tr.absorb(b"sparse mix/value",bytes(&[rho[0],rho[1],rho[2],value]));}
 fn split<'a>(k:&Key,row:&'a[L],col:&'a[L])->[&'a[L];4]{[&row[..k.row_bits/2],&row[k.row_bits/2..],&col[..k.col_bits/2],&col[k.col_bits/2..]]}
 fn endpoints(idx:&Index,aux:&Committed,r:&[L])->Vec<L>{let n=1<<idx.key.entry_bits;crate::parallel::map(19,|j|if j<15{public_pcs::evaluate(&idx.committed.values[j*n..(j+1)*n],r)}else{public_pcs::evaluate(&aux.values[(j-15)*n..(j-14)*n],r)})}
 // Bind all endpoint values before sampling their channel-combination points.
-fn claims(r:&[L],e:&[L],tr:&mut Transcript<'_,H>)->((Vec<L>,L),(Vec<L>,L)){
+pub(crate) fn claims(r:&[L],e:&[L],tr:&mut Transcript<'_,H>)->((Vec<L>,L),(Vec<L>,L)){
  let mut ch=tr.round(&ZERO,bytes(e));let ri:Vec<_>=(0..4).map(|_|ch.field()).collect();let ra:Vec<_>=(0..2).map(|_|ch.field()).collect();
  let vi=e[..15].iter().enumerate().map(|(i,&v)|chi(i,&ri)*v).sum();let va=e[15..].iter().enumerate().map(|(i,&v)|chi(i,&ra)*v).sum();let mut pi=r.to_vec();pi.extend(ri);let mut pa=r.to_vec();pa.extend(ra);((pi,vi),(pa,va))
 }
-fn read_leaf(e:&[L],r:&[L],hash:[L;3])->L{(0..4).map(|c|chi(c,&r[1..])*(L::ONE+hash[0]*e[15+c]+hash[1]*(e[4+c]+r[0]*(e[4+c]+e[8+c]))+hash[2]*e[c])).sum()}
-fn table_leaf(k:&Key,queries:[&[L];4],e:&[L;4],r:&[L],hash:[L;3])->L{let n=k.table_bits();let addr:L=r[..n].iter().enumerate().map(|(j,&x)|basis(j)*x).sum();(0..4).map(|c|{let q=queries[c];let v=eq_eval(q,&r[..q.len()])*r[q.len()..n].iter().map(|&x|L::ONE+x).product::<L>();chi(c,&r[n+1..])*(L::ONE+hash[0]*v+hash[1]*r[n]*e[c]+hash[2]*addr)}).sum()}
-fn bind_products(reads:&[L;8],table:&[L;8],tr:&mut Transcript<'_,H>)->Result<(),String>{for c in 0..4{if reads[2*c]*table[2*c+1]!=reads[2*c+1]*table[2*c]{return Err("memory multiset products".into());}}tr.absorb(b"memory products",bytes(&[reads.as_slice(),table.as_slice()].concat()));Ok(())}
-fn final_claim(r:&[L],e:&[L;4],tr:&mut Transcript<'_,H>)->(Vec<L>,L){let mut ch=tr.round(&ZERO,bytes(e));let rc:Vec<_>=(0..2).map(|_|ch.field()).collect();let value=public_pcs::evaluate(e,&rc);let mut p=r.to_vec();p.extend(rc);(p,value)}
+pub(crate) fn read_leaf(e:&[L],r:&[L],hash:[L;3])->L{(0..4).map(|c|chi(c,&r[1..])*(L::ONE+hash[0]*e[15+c]+hash[1]*(e[4+c]+r[0]*(e[4+c]+e[8+c]))+hash[2]*e[c])).sum()}
+pub(crate) fn table_leaf(k:&Key,queries:[&[L];4],e:&[L;4],r:&[L],hash:[L;3])->L{let n=k.table_bits();let addr:L=r[..n].iter().enumerate().map(|(j,&x)|basis(j)*x).sum();(0..4).map(|c|{let q=queries[c];let v=eq_eval(q,&r[..q.len()])*r[q.len()..n].iter().map(|&x|L::ONE+x).product::<L>();chi(c,&r[n+1..])*(L::ONE+hash[0]*v+hash[1]*r[n]*e[c]+hash[2]*addr)}).sum()}
+pub(crate) fn bind_products(reads:&[L;8],table:&[L;8],tr:&mut Transcript<'_,H>)->Result<(),String>{for c in 0..4{if reads[2*c]*table[2*c+1]!=reads[2*c+1]*table[2*c]{return Err("memory multiset products".into());}}tr.absorb(b"memory products",bytes(&[reads.as_slice(),table.as_slice()].concat()));Ok(())}
+pub(crate) fn final_claim(r:&[L],e:&[L;4],tr:&mut Transcript<'_,H>)->(Vec<L>,L){let mut ch=tr.round(&ZERO,bytes(e));let rc:Vec<_>=(0..2).map(|_|ch.field()).collect();let value=public_pcs::evaluate(e,&rc);let mut p=r.to_vec();p.extend(rc);(p,value)}
 pub fn prove(idx:&Index,row:&[L],col:&[L],rho:[L;3],value:L,tr:&mut Transcript<'_,H>)->Proof{
  let clock=std::time::Instant::now();let k=&idx.key;assert_eq!((row.len(),col.len()),(k.row_bits,k.col_bits));begin(k,row,col,rho,value,tr);let count=1<<k.entry_bits;let queries=split(k,row,col);
  let tables:[Vec<L>;4]=queries.map(eq_expand);

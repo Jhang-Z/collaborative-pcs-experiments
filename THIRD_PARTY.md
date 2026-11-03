@@ -13,3 +13,9 @@ The artifact fetches fixed upstream dependencies at build time. They are ignored
 The collaborative protocol implementation and adapters come from the active paper implementation. The Keccak oracle and application relation/exporters provide independent statement checks. The generic source-path adjustment in the packaged exporter resolves the oracle inside this standalone repository; it changes no circuit or proof operation.
 
 `SOURCE_MANIFEST.json` identifies included implementation/control sources. `third_party/*-files.json` identify required fixed upstream files. No private input, share, proof, proof hash, server credential, host configuration or parent Git history is included. The scope of any future release license must respect these third-party components.
+
+## General-circuit update
+
+`third_party/pappas-general.patch` contains the general frontend/index-binding integration, compact layout changes, Merkle fix and timing hooks relative to the same pinned author commit. Bootstrap fetches that commit directly, applies the patch in a fresh build tree and checks the resulting files against `pappas-general-files.json`. The upstream repository is not vendored in this release; its existing terms and notices remain applicable. `scripts/general/` supplies the signed Boolean relation exporter, thread-CPU MPI shim and v2 replay used with this adapter.
+
+The packaged `binius-general` adapter adds preserved-graph Boolean inputs and a one-sample mode for the same task. Upstream Binius64 remains pinned and unmodified. The four historical configurations retain their explicit gamma871 identity; the new general entry uses gamma520/tau4/b3.

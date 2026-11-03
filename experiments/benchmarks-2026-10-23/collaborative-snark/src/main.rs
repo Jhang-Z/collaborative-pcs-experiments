@@ -8,6 +8,68 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Export one global graph and shared benchmark input.
+    GeneralInput {
+        #[arg(long)]
+        gates:usize,
+        #[arg(long,default_value_t=42)]
+        seed:u64,
+        #[arg(long,default_value_t=128)]
+        max_parties:usize,
+        #[arg(long,value_enum,default_value="nand-copy")]
+        task:ours_fullnet::general::Task,
+        #[arg(long)]
+        out:PathBuf,
+    },
+    /// Verify a general proof using only its public key and statement.
+    GeneralVerify {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Correctness controls for one global general binary circuit.
+    General {
+        #[arg(long="gates",alias="constraints", default_value_t = 64)]
+        constraints: usize,
+        #[arg(long,value_enum,default_value="nand-copy")]
+        task:ours_fullnet::general::Task,
+        #[arg(long)]
+        input:Option<PathBuf>,
+        #[arg(long)]
+        trace:Option<PathBuf>,
+        #[arg(long,default_value_t=520)]
+        gamma:usize,
+        #[arg(long,default_value_t=4)]
+        tau:usize,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 16)]
+        max_parties: usize,
+        #[arg(long, default_value_t = 8)]
+        parties: usize,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 3)]
+        index_block_bits: usize,
+    },
+    /// Benchmark online kernels with in-memory synthetic shares (default: Keccak).
+    Benchmark {
+        #[arg(long, value_enum, default_value_t = ours_fullnet::application::Application::Keccak)]
+        application: ours_fullnet::application::Application,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        trace: PathBuf,
+        #[arg(long)]
+        parties: usize,
+        #[arg(long)]
+        messages: usize,
+        #[arg(long, default_value_t = 520)]
+        gamma: usize,
+        #[arg(long, default_value_t = 4)]
+        tau: usize,
+        #[arg(long)]
+        development: bool,
+    },
     Prepare {
         #[arg(long, value_enum, default_value_t = ours_fullnet::application::Application::Sha256)]
         application: ours_fullnet::application::Application,
@@ -22,7 +84,7 @@ enum Command {
         parties: usize,
         #[arg(long)]
         messages: usize,
-        #[arg(long, default_value_t = 871)]
+        #[arg(long, default_value_t = 520)]
         gamma: usize,
         #[arg(long, default_value_t = 4)]
         tau: usize,
@@ -71,12 +133,22 @@ enum Command {
     },
 }
 fn main() -> Result<()> {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .use_current_thread()
+    let args=Args::parse();
+    let pool=rayon::ThreadPoolBuilder::new().num_threads(1);
+    let pool=pool.use_current_thread();
+    pool
         .build_global()
         .map_err(anyhow::Error::msg)?;
-    match Args::parse().command {
+    match args.command {
+        Command::GeneralInput {gates,seed,max_parties,task,out}=>ours_fullnet::general::export_input(gates,seed,max_parties,task,&out),
+        Command::GeneralVerify {out} => ours_fullnet::general::verify_files(&out),
+        Command::General { constraints, seed, max_parties, parties, task,input,trace,gamma,tau,index_block_bits,out } =>
+            ours_fullnet::general::run(constraints,seed,max_parties,parties,task,input.as_deref(),trace.as_deref(),gamma,tau,index_block_bits,&out),
+        Command::Benchmark { application, out, trace, parties, messages, gamma, tau, development } =>
+            ours_fullnet::benchmark::run(ours_fullnet::prepare::Shape {
+                application,layout_version:ours_fullnet::prepare::LAYOUT_VERSION,
+                parties,messages,gamma,tau,development,
+            },&out,&trace),
         Command::Prepare {
             application,
             keccak,

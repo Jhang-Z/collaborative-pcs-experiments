@@ -23,9 +23,11 @@ binius-prover = { path = "../../implementations/binius64/crates/prover" }
 binius-transcript = { path = "../../implementations/binius64/crates/transcript" }
 binius-verifier = { path = "../../implementations/binius64/crates/verifier" }
 digest = "0.11"
+blake3 = "=1.8.7"
 bytemuck = "1.18"
 rand = { version = "0.10.1", default-features = false, features = ["std", "std_rng"] }
 sha2 = "0.11"
+libc = "0.2"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

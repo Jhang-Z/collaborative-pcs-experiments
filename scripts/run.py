@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--groups', nargs='+', choices=['1', '2', '3', '4'])
+    parser.add_argument('--groups', nargs='+', choices=['1', '2', '3', '4', '5'])
     parser.add_argument('--instances', nargs='+', type=int)
     parser.add_argument('--config', type=Path, default=ROOT / 'configs/experiments.json')
     parser.add_argument('--output', type=Path)
@@ -33,6 +33,9 @@ def main():
             N=32 if kind == 'ours-app' else (1 if kind == 'native-baseline' else 16),
             size=8 if kind == 'ours-app' else (16 if kind.endswith('pcs') else 2),
             repetition=1, groups=[], networks=list(settings['networks'])) for kind in kinds]
+        for job in selected:
+            if job['kind'].endswith('general'):
+                job.update(size=1024, N=1 if job['kind'] == 'binius-general' else 16)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     out = (args.output or ROOT / 'runs' / stamp).resolve()
     if args.check_env:

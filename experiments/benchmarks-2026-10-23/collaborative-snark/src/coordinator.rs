@@ -281,18 +281,31 @@ pub fn run(out: &Path, address: &str) -> Result<()> {
 }
 
 pub fn run_with_mode(out: &Path, address: &str, mode: MatrixMode) -> Result<()> {
-    run_internal(out, address, mode, None, false)
+    run_internal(out, address, mode, None, false, None)
 }
 
 pub fn simulate(out: &Path, trace: &Path) -> Result<()> {
-    run_internal(out, "", MatrixMode::Structured, Some(trace), false)
+    run_internal(out, "", MatrixMode::Structured, Some(trace), false, None)
 }
 
 pub fn simulate_isolated(out: &Path, trace: &Path) -> Result<()> {
-    run_internal(out, "", MatrixMode::Structured, Some(trace), true)
+    run_internal(out, "", MatrixMode::Structured, Some(trace), true, None)
 }
 
-fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path>, isolated: bool) -> Result<()> {
+pub(crate) fn simulate_benchmark(out:&Path,trace:&Path,cfg:sha_zk::Config,start:Instant)->Result<()> {
+    run_internal(out,"",MatrixMode::Structured,Some(trace),cfg!(target_os="linux"),Some((cfg,start)))
+}
+
+// Synthetic arrays exercise the kernels without claiming a valid witness. Evaluate
+// the usual checks and retain failures; real proving still rejects immediately.
+fn consistency(condition:bool,synthetic:bool,failures:&mut Vec<&'static str>,name:&'static str)->Result<()> {
+    ensure!(condition||synthetic,"{name}");
+    if !condition {failures.push(name);}
+    Ok(())
+}
+
+fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path>, isolated: bool,
+    prepared:Option<(sha_zk::Config,Instant)>) -> Result<()> {
     let prep = Instant::now();
     let shape = Shape::read(out)?;
     let data = fs::read(out.join("statement.bin"))?;
@@ -301,7 +314,10 @@ fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path
         .chunks_exact(32)
         .map(|d| d.try_into().unwrap())
         .collect();
-    let cfg=Arc::new(PublicPreprocessing::new(shape.config()?,digests.clone()));
+    let synthetic=prepared.is_some();
+    let mut consistency_failures=Vec::new();
+    let (cfg,initialization_start)=match prepared {Some((cfg,start))=>(cfg,Some(start)),None=>(shape.config()?,None)};
+    let cfg=Arc::new(PublicPreprocessing::new(cfg,digests.clone()));
     // The structured path never builds or commits a generic sparse index.
     let index = (mode == MatrixMode::Indexed).then(|| Index::new(&cfg, shape.gamma));
     let structured = if mode == MatrixMode::Structured {
@@ -326,12 +342,23 @@ fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path
     let public_cache_payload_bytes=common_public_cache_payload_bytes+key_public_cache_payload_bytes+fixed_interpolation_payload_bytes()+statement.len();
     println!("{}",serde_json::json!({"event":"public_preprocessing_complete","seconds":public_preprocessing_seconds,"added_public_cache_payload_bytes":public_cache_payload_bytes,"common_public_tables_payload_bytes":common_public_cache_payload_bytes,"canonical_key_extra_cache_payload_bytes":key_public_cache_payload_bytes,"statement_payload_bytes":statement.len(),"fixed_interpolation_payload_bytes":fixed_interpolation_payload_bytes(),"payload_scope":"extra public tables held by simulator coordinator; shared common tables counted once; excludes original NTT/layouts, Vec headers, capacity and allocator overhead; not cluster/per-party RAM","private_material_reused":false,"public_config_shared_only_in_sequential_simulation":trace.is_some()}));
     let mut bus = if let Some(trace) = trace {
-        Bus { peers: vec![], simulation: Some(crate::simulation::Simulation::new(out, trace,Arc::clone(&cfg),isolated)?),
+        let simulation=if synthetic {
+            crate::simulation::Simulation::benchmark(out,trace,Arc::clone(&cfg))?
+        } else {crate::simulation::Simulation::new(out,trace,Arc::clone(&cfg),isolated)?};
+        Bus { peers: vec![], simulation: Some(simulation),
               sent: 0, received: 0, frames: 0, rounds: 0 }
     } else {
         Bus::accept(address, shape.parties)?
     };
     let preparation_seconds = prep.elapsed().as_secs_f64();
+    if let Some(start)=initialization_start {
+        fs::write(out.join("preparation.json"),serde_json::to_vec_pretty(&serde_json::json!({
+            "phase":"synthetic_benchmark_initialization","seconds":start.elapsed().as_secs_f64(),
+            "synthetic_shares":true,"real_witness_constructed":false,"private_share_files_written":0,
+            "includes_all_workers_ready":true,"worker_local_generation":isolated,
+            "development":shape.development,
+        }))?)?;
+    }
     println!(
         "{}",
         serde_json::json!({"event":"online_start","all_parties_ready":true,"development":shape.development})
@@ -378,7 +405,7 @@ fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path
     let mut rcol = vec![];
     for _ in 0..nv {
         let v = bus.sum(wire::command(SC1_COL_ROUND, &[lambda1]), 4)?;
-        ensure!(v[0] + v[1] == claim, "SC1 column consistency");
+        consistency(v[0]+v[1]==claim,synthetic,&mut consistency_failures,"SC1 column consistency")?;
         let r = tr.round(&ZERO, bytes(&v)).field();
         ensure!(r != L::ONE, "SC1 excluded challenge");
         claim = interp(&v, r);
@@ -403,7 +430,7 @@ fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path
     let mut ry = vec![];
     for _ in 0..cfg.pcs.log_k() {
         let v = bus.sum(wire::command(SC1_SLOT_ROUND, &[lambda1]), 4)?;
-        ensure!(v[0] + v[1] == claim, "SC1 slot consistency");
+        consistency(v[0]+v[1]==claim,synthetic,&mut consistency_failures,"SC1 slot consistency")?;
         let r = tr.round(&ZERO, bytes(&v)).field();
         ensure!(r != L::ONE, "SC1 excluded challenge");
         claim = interp(&v, r);
@@ -415,10 +442,11 @@ fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path
     let endpoints = [ep[0], ep[1], ep[2]];
     let y1 = ep[3];
     let rx: Vec<_> = rcol.iter().chain(&ry).copied().collect();
-    ensure!(
+    consistency(
         claim == eq_eval(&tau, &rx) * (endpoints[0] * endpoints[1] + endpoints[2]) + lambda1 * y1,
+        synthetic,&mut consistency_failures,
         "SC1 endpoint consistency"
-    );
+    )?;
     let mut c = tr.round(&ZERO, bytes(&ep));
     let rho = [c.field(), c.field(), c.field()];
     let (mut weights, public) = cfg.weight_values(&rcol, &ry, rho);
@@ -435,7 +463,7 @@ fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path
     let mut rp = vec![];
     for _ in 0..cfg.sc2_len() {
         let v = bus.sum(wire::command(SC2_ROUND, &[lambda2]), 3)?;
-        ensure!(v[0] + v[1] == claim2, "SC2 consistency");
+        consistency(v[0]+v[1]==claim2,synthetic,&mut consistency_failures,"SC2 consistency")?;
         let r = tr.round(&ZERO, bytes(&v)).field();
         ensure!(r != L::ONE, "SC2 excluded challenge");
         claim2 = interp(&v, r);
@@ -447,10 +475,11 @@ fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path
     }
     let v = bus.sum(vec![SC2_ENDPOINT], 2)?;
     let (value, y2) = (v[0], v[1]);
-    ensure!(
+    consistency(
         claim2 == weights[0] * value + lambda2 * y2,
+        synthetic,&mut consistency_failures,
         "SC2 endpoint consistency"
-    );
+    )?;
     let private_proof = index.as_ref().map(|index| {
         tr.absorb(b"private matrix endpoint", bytes(&[weights[0], value, y2]));
         crate::sparse_matrix::prove(&index.private, &rcol, &rp, rho, weights[0], &mut tr)
@@ -507,21 +536,49 @@ fn run_internal(out: &Path, address: &str, mode: MatrixMode, trace: Option<&Path
     let mut record = serde_json::json!({"phase":"online_proving","online_seconds":online_seconds,"online_ns":online_ns,"coordinator_preparation_seconds":preparation_seconds,"public_preprocessing_seconds":public_preprocessing_seconds,"added_public_cache_payload_bytes":public_cache_payload_bytes,"common_public_tables_payload_bytes":common_public_cache_payload_bytes,"canonical_key_extra_cache_payload_bytes":key_public_cache_payload_bytes,"proof_bytes":proof_bytes.len(),"online_payload_sent_by_coordinator":bus.sent,"online_payload_sent_by_parties":bus.received,"online_framing_bytes":bus.frames,"online_exchange_rounds":bus.rounds,"development":shape.development,"private_state_files_read_by_coordinator":0,"complete_proof_format":format,"matrix_mode":mode.name(),"generic_matrix_authentication":index.is_some(),"verification_status":"pending_independent_process","formal_measurement":false,"per_party_affinity_and_namespace":"external_runner_must_verify"});
     if trace.is_some() {
         record["execution_mode"] = if isolated {"persistent-worker-process-sequential-simulation"} else {"single-process-sequential-simulation"}.into();
-        record["private_state_files_read_by_coordinator"] = if isolated {0} else {shape.parties}.into();
+        record["private_state_files_read_by_coordinator"] = if isolated||synthetic {0} else {shape.parties}.into();
         record["logical_coordinator_private_state_files_read"] = 0.into();
         record["private_state_counter_scope"] = if isolated {"parent loads zero Shares; each persistent child loads its own one; same-host OS account is not a security boundary"} else {"simulation harness hosts all workers; no process privacy isolation"}.into();
         record["per_party_affinity_and_namespace"] = "sequential backend pinned externally; virtual party cores modeled offline".into();
     }
     println!(
         "{}",
-        serde_json::json!({"event":"online_end","online_seconds":online_seconds,"proof_bytes":proof_bytes.len()})
+        if synthetic {
+            serde_json::json!({"event":"benchmark_end","online_seconds":online_seconds,"transcript_bytes":proof_bytes.len(),"synthetic_shares":true})
+        } else {serde_json::json!({"event":"online_end","online_seconds":online_seconds,"proof_bytes":proof_bytes.len()})}
     );
     std::io::stdout().flush()?;
     bus.empty(STOP, &[])?;
     if let Some(sim)=&bus.simulation {record["simulation_backend"]=sim.metadata();}
-    fs::write(out.join("proof.bin"), proof_bytes)?;
+    let artifact=if synthetic {
+        record["phase"]="online_kernel_benchmark".into();
+        record["synthetic_shares"]=true.into();
+        record["verification_status"]="not_applicable_synthetic_shares".into();
+        record["algebraic_check_failures"]=serde_json::to_value(consistency_failures)?;
+        record["transcript_bytes"]=proof_bytes.len().into();
+        record["serialized_transcript_format"]=format.into();
+        record.as_object_mut().unwrap().remove("proof_bytes");
+        record.as_object_mut().unwrap().remove("complete_proof_format");
+        "benchmark-transcript.bin"
+    } else {"proof.bin"};
+    fs::write(out.join(artifact), proof_bytes)?;
     fs::write(out.join("prove.json"), serde_json::to_vec_pretty(&record)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod benchmark_consistency_tests {
+    use super::consistency;
+    #[test]
+    fn strict_rejects_and_synthetic_records_the_same_failed_check() {
+        let mut failures=vec![];
+        assert!(consistency(false,false,&mut failures,"SC1 column consistency").is_err());
+        assert!(failures.is_empty());
+        consistency(false,true,&mut failures,"SC1 column consistency").unwrap();
+        assert_eq!(failures,vec!["SC1 column consistency"]);
+        consistency(true,false,&mut failures,"valid check").unwrap();
+        assert_eq!(failures.len(),1);
+    }
 }
 pub fn verify(out: &Path) -> Result<()> {
     let prep = Instant::now();
@@ -568,7 +625,7 @@ mod indexed_keccak_tests {
         fs::write(&input,(0..400).map(|x|x as u8).collect::<Vec<_>>()).unwrap();
         let out=f.0.join("proof");
         crate::prepare::run(Shape{application:crate::application::Application::Keccak,layout_version:crate::prepare::LAYOUT_VERSION,parties:8,messages:2,gamma:16,tau:3,development:true},&input,&out).unwrap();
-        run_internal(&out,"",MatrixMode::Indexed,Some(&f.0.join("trace.json")),false).unwrap();
+        run_internal(&out,"",MatrixMode::Indexed,Some(&f.0.join("trace.json")),false,None).unwrap();
         let key=fs::read(out.join("key.bin")).unwrap();
         assert_eq!(&key[..8],b"KEYKIDX1");
         let decoded=crate::indexed_codec::decode_key(&key).unwrap();

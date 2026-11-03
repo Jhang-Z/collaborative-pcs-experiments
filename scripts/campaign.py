@@ -58,7 +58,7 @@ def prepare_inputs(root, run, selected):
     if pcs:
         raw = hashlib.shake_256(b'collab-pcs-experiments/2026-10-23/pcs-input/v1').digest((1 << max(pcs))//8)
         (path / 'pcs-bits.bin').write_bytes(raw)
-    sizes = [x['size'] for x in selected if not x['kind'].endswith('pcs')]
+    sizes = [x['size'] for x in selected if x['kind'] in ['ours-app', 'native-keccak', 'native-baseline']]
     if sizes:
         data = os.urandom(max(sizes)*200)
         private = path / 'private-input.bin'
@@ -153,7 +153,13 @@ def summarize(run, state):
                 **{key: timing[key] for key in ['online_s', 'compute_critical_s',
                     'network_increment_s', 'transmitted_bytes']},
                 memory_peak_bytes=record['resources']['final']['memory.peak'],
-                memory_budget_bytes=record['resources']['budget_bytes'], origin_run=run.name))
+                memory_budget_bytes=record['resources']['budget_bytes'], origin_run=run.name,
+                inputs=record.get('inputs'), xor_gates=record.get('xor_gates'), and_gates=record.get('and_gates'),
+                total_communication_GB=timing['transmitted_bytes']/1e9,
+                max_prover_peak_rss_bytes=record.get('max_prover_peak_rss_bytes'),
+                proof_MiB=record['proof_bytes']/2**20 if 'proof_bytes' in record else None,
+                verify_ms=record['verify_s']*1000 if 'verify_s' in record else None,
+                proof_verify_scope=record.get('proof_verify_scope', 'see case validation scope')))
         trace = run / 'public/traces' / record['label'] / 'coordinator.json'
         if trace.exists():
             trace = json.loads(trace.read_text())
@@ -173,7 +179,7 @@ def summarize(run, state):
         f'Run complete: {state["complete"]}. Performance sample: {state["performance_sample"]}.', '',
         'Computations are measured sequentially on one core; times are causal parallel/network replay estimates.',
         'Private inputs, shares, proofs and their hashes are not included in this public export.',
-        'Pappas Keccak reports author-native generation checks; full_proof_verified is false.', '',
+        'Pappas application paths report native generation checks; full_proof_verified is false.', '',
         '| Kind | Size | N | Network | Online (s) | Compute (s) | Network increment (s) |',
         '|---|---:|---:|---|---:|---:|---:|']
     for row in rows:
@@ -202,7 +208,7 @@ def execute(root, run, selected, settings, args):
     (run / 'private').mkdir(mode=0o700)
     (run / 'public').mkdir()
     state = dict(complete=False, expected=len(selected), cases=[],
-                 performance_sample=not args.smoke, model='causal-fifo-tx-fair-rx-v1',
+                 performance_sample=not args.smoke, model=('causal-fifo-cpu-tx-fair-rx-v2' if any(x['kind'].endswith('general') for x in selected) else 'causal-fifo-tx-fair-rx-v1'),
                  started_at_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
     save(run / 'public/settings.json', settings)
     save(run / 'public/plan.json', json.loads((run / 'plan.json').read_text()))
@@ -264,9 +270,12 @@ def execute(root, run, selected, settings, args):
                 save(path, record); state['cases'].append(record)
                 state.pop('running', None)
                 save(run / 'public/state.json', state); summarize(run, state); export(run)
-                if not record['passed']:
+                if not record['passed'] and not job['kind'].endswith('general'):
                     raise RuntimeError('Case failed; retained original failure and stopped: ' + job['label'])
             state['complete'] = True
+            state['all_passed'] = all(record['passed'] for record in state['cases'])
+            if not state['all_passed']:
+                raise RuntimeError('Campaign attempted every selected case; failures are retained in results.json')
         except Exception as error:
             state['error'] = str(error)
             raise

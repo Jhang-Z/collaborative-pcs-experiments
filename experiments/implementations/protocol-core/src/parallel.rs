@@ -8,18 +8,28 @@ static WORKERS: AtomicU64 = AtomicU64::new(0);
 static PARTIES: AtomicU64 = AtomicU64::new(0);
 
 pub fn map<R: Send>(n: usize, f: impl Fn(usize) -> R + Sync + Send) -> Vec<R> {
+    if crate::execution_trace::recording() { return (0..n).map(f).collect(); }
     #[cfg(feature = "parallel")]
     { (0..n).into_par_iter().map(f).collect() }
     #[cfg(not(feature = "parallel"))]
     { (0..n).map(f).collect() }
 }
 pub fn map_mut<T: Send, R: Send>(a: &mut [T], f: impl Fn(usize, &mut T) -> R + Sync + Send) -> Vec<R> {
+    if crate::execution_trace::recording() { return a.iter_mut().enumerate().map(|(i,x)| f(i,x)).collect(); }
     #[cfg(feature = "parallel")]
     { a.par_iter_mut().enumerate().with_max_len(1).map(|(i,x)| f(i,x)).collect() }
     #[cfg(not(feature = "parallel"))]
     { a.iter_mut().enumerate().map(|(i,x)| f(i,x)).collect() }
 }
 pub fn parties<T: Send, R: Send>(a: &mut [T], f: impl Fn(usize, &mut T) -> R + Sync + Send) -> Vec<R> {
+    // A single host replays virtual parties; keep trace clocks on the calling thread.
+    // The default (untraced) bounded-pool implementation remains unchanged.
+    if crate::execution_trace::recording() {
+        return a.iter_mut().enumerate().map(|(i,x)| {
+            let _party=crate::execution_trace::scope(i);
+            f(i,x)
+        }).collect();
+    }
     map_mut(a, |i,x| {
         if i < 64 { PARTIES.fetch_or(1 << i, Relaxed); }
         #[cfg(feature = "parallel")]

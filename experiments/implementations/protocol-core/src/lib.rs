@@ -5,6 +5,7 @@
 pub mod algebra;
 pub mod code;
 pub mod field;
+pub mod execution_trace;
 pub mod fs;
 pub mod merkle;
 pub mod net;
@@ -40,3 +41,5 @@ pub mod keccak_circuit;
 pub mod keccak_structured;
 
 pub mod field_pcs;
+
+pub mod compact_sparse_matrix;

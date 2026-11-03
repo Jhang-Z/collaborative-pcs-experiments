@@ -56,7 +56,7 @@ impl Shape {
             ensure!(
                 self.messages.is_power_of_two()
                     && (8..=max_messages).contains(&self.messages)
-                    && self.gamma == 871
+                    && matches!(self.gamma,520|871)
                     && self.tau == 4,
                 "formal parameter shape"
             );
