@@ -106,7 +106,7 @@ def execute(root, run, job, runtime, resources, settings, timeout, set_phase, co
         raise ValueError('independent graph/input/output check failed')
     result = dict(inputs=graph['inputs'], xor_gates=xors, and_gates=ands,
         same_logical_graph=True, same_input=True, independent_boolean_oracle=True,
-        public_output=output, gamma=520, tau=4, index_block_bits=3,
+        public_output=output, graph_seed=42,
         max_prover_peak_rss_bytes=None, full_proof_verified=kind != 'native-general')
     binary, proof, trace = runtime['binaries'][kind], work / 'proof', work / 'trace'
     if kind == 'ours-general':
@@ -138,7 +138,8 @@ def execute(root, run, job, runtime, resources, settings, timeout, set_phase, co
             raise ValueError('wrong public output accepted')
         shutil.copy2(proof / 'statement.json', public_verify / 'statement.json')
         call('restored-verification', command)
-        result.update(proof_bytes=len(original), verify_s=control['verify_wall_seconds'],
+        result.update(gamma=520, tau=4, index_block_bits=3,
+            proof_bytes=len(original), verify_s=control['verify_wall_seconds'],
             public_only_verification=True, mutated_proof_rejected=True, wrong_output_rejected=True,
             budget=evaluate(control['parameters']), proof_format=control['proof_format'])
     elif kind == 'native-general':
