@@ -100,7 +100,7 @@
   "experiments/implementations/protocol-core/src/zk.rs": "69155b11830a10bea8f7b14f9d25623ebc24f30f84fa4cb1fc54aae152e53474",
   "reproduce.sh": "856ba3b5c021f74746fb4d7bb50c02d1d14afc1961004b9f182b3a8fe879c7a7",
   "scripts/backend.py": "5c200bedffcbf79371192cf2d30403f94fc3cc9f4cca49d555785babdf90107c",
-  "scripts/bootstrap.py": "6fdf8610aa205d778147ffa6d42e4084c0a0bab1eef40c6a8082fb508818c412",
+  "scripts/bootstrap.py": "64ae4f308daf1a752bbfddfafba4c5d921fad5a0eed707068b74a121ffb81d10",
   "scripts/campaign.py": "408f67ed4cd61ecf32d4bcbebe1a793b8ba21200be3729fac0c9a94c32743c7a",
   "scripts/general/backend.py": "55ea5af67f4505f1d31f0f622242359a0d6c4de3ecfa2f2e4e850028a5cbec05",
   "scripts/general/budget520.py": "bce6881ee543f1170612387f3014557cd57235026e17edf5b8f9a74844ac525a",

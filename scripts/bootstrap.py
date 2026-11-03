@@ -115,7 +115,8 @@ def run(argv, log, env=None, cwd=None):
         result = subprocess.run(list(map(str, argv)), cwd=cwd, env=env,
                                 stdout=stream, stderr=subprocess.STDOUT)
     if result.returncode:
-        raise RuntimeError(f'Build/setup command failed ({result.returncode}); see {log}')
+        tail = '\n'.join(log.read_text(errors='replace').splitlines()[-60:])
+        raise RuntimeError(f'Build/setup command failed ({result.returncode}); see {log}\n{tail}')
 
 
 def download(url, target, expected=None, checksum_url=None):
@@ -525,7 +526,9 @@ def prepare(root: Path, kinds: set[str], install: bool = True) -> dict:
                 if not record_file.exists() or not executable.exists() or json.loads(record_file.read_text()).get('binary_sha256') != sha(executable):
                     run([cmake, '-S', staged, '-B', target, '-DCMAKE_BUILD_TYPE=Release',
                          '-DCMAKE_C_COMPILER=' + cc, '-DCMAKE_CXX_COMPILER=' + cxx,
-                         '-DMPI_CXX_COMPILER=' + str(mpicxx)], log, environment)
+                         '-DMPI_CXX_COMPILER=' + str(mpicxx),
+                         '-DMPI_C_COMPILER=' + str(Path(mpicxx).with_name('mpicc')),
+                         '-DMPIEXEC_EXECUTABLE=' + str(mpirun)], log, environment)
                     run([cmake, '--build', target, '-j' + str(jobs)], log, environment)
                     save(record_file, {'identity': identity, 'binary_sha256': sha(executable)})
                 runtime['binaries'][kind] = str(executable)
